@@ -41,6 +41,8 @@ const searchInput = ref(String(props.query.search || ""));
 const selectedPaths = ref({});
 const selectedLineIndexes = ref({});
 const batchReviewIds = ref([]);
+const batchMode = ref(false);
+const reviewScope = ref("human");
 const recoveryOpen = ref({});
 const recoveryQueries = ref({});
 const selectedSeriesIds = ref({});
@@ -52,7 +54,46 @@ let mediaQuery = null;
 let isDesktop = true;
 let returnFocus = null;
 
-const items = computed(() => props.payload?.items || []);
+const allItems = computed(() => props.payload?.items || []);
+const stateCounts = computed(() => props.payload?.state_counts || {});
+function firstValidCount(...values) {
+  for (const value of values) {
+    if (value === null || value === undefined || value === "") continue;
+    const count = Number(value);
+    if (Number.isFinite(count) && count >= 0) return count;
+  }
+  return null;
+}
+const automaticReviewCount = computed(() => (
+  firstValidCount(
+    stateCounts.value.automatic_safe,
+    stateCounts.value.auto_eligible,
+    stateCounts.value.automatic,
+    stateCounts.value.automatic_processing,
+  ) ?? allItems.value.filter((item) => item?.batch_eligible).length
+));
+const humanRequiredReviewCount = computed(() => {
+  const preferred = firstValidCount(stateCounts.value.human_required);
+  if (preferred !== null) return preferred;
+  const total = firstValidCount(props.payload?.total, stateCounts.value.needs_action, stateCounts.value.open);
+  if (!props.payload?.next_cursor && total !== null && allItems.value.length >= total) {
+    return allItems.value.filter((item) => !item?.batch_eligible).length;
+  }
+  return total ?? allItems.value.filter((item) => !item?.batch_eligible).length;
+});
+const items = computed(() => {
+  if (props.query.state !== "needs_action" || reviewScope.value === "all") return allItems.value;
+  if (reviewScope.value === "automatic") return allItems.value.filter((item) => item?.batch_eligible);
+  return allItems.value.filter((item) => !item?.batch_eligible);
+});
+const currentScopeTotal = computed(() => {
+  if (props.query.state !== "needs_action" || reviewScope.value === "all") {
+    return firstValidCount(props.payload?.total) ?? items.value.length;
+  }
+  return reviewScope.value === "automatic"
+    ? automaticReviewCount.value
+    : humanRequiredReviewCount.value;
+});
 const busySet = computed(() => new Set(props.busyIds || []));
 const detailLoadingSet = computed(() => new Set(props.detailLoadingIds || []));
 const selectedSummary = computed(() => (
@@ -61,7 +102,6 @@ const selectedSummary = computed(() => (
 const selectedItem = computed(() => (
   props.detailsByReview?.[selectedReviewId.value] || selectedSummary.value
 ));
-const stateCounts = computed(() => props.payload?.state_counts || {});
 const selectedBatchAction = computed(() => {
   const first = items.value.find((item) => batchReviewIds.value.includes(String(item.review_id)));
   return String(first?.recommended_action?.action || "safe.default");
@@ -80,7 +120,7 @@ function kindLabel(kind) {
     target_ambiguity: "來源配對",
     subtitle_quality: "翻譯品質",
     asr_quality: "轉錄品質",
-  }[kind] || "人工審核";
+  }[kind] || "例外項目";
 }
 
 function reviewOperation(item) {
@@ -263,7 +303,8 @@ function stateLabel(item) {
   const operationLabel = reviewOperationLabel(commandStatus);
   if (operationLabel) return operationLabel;
   if (item?.state === "processing") return "正在處理";
-  return "等你處理";
+  if (item?.batch_eligible) return "等待自動處理";
+  return "需要你決定";
 }
 
 function stateTone(item) {
@@ -688,6 +729,20 @@ function setState(state) {
   if (state !== props.query.state) emitQuery({ state });
 }
 
+function setReviewScope(scope) {
+  if (!["human", "automatic", "all"].includes(scope) || reviewScope.value === scope) return;
+  reviewScope.value = scope;
+  batchMode.value = false;
+  batchReviewIds.value = [];
+  selectedReviewId.value = "";
+  detailOpen.value = false;
+}
+
+function toggleBatchMode() {
+  batchMode.value = !batchMode.value;
+  if (!batchMode.value) batchReviewIds.value = [];
+}
+
 function setKind(kind) {
   if (kind !== props.query.kind) emitQuery({ kind });
 }
@@ -870,6 +925,13 @@ watch(searchInput, (value) => {
   }, 300);
 });
 
+watch(() => props.query.state, (state) => {
+  if (state === "needs_action") return;
+  reviewScope.value = "human";
+  batchMode.value = false;
+  batchReviewIds.value = [];
+});
+
 watch(items, (nextItems) => {
   const ids = new Set(nextItems.map((item) => String(item.review_id)));
   batchReviewIds.value = batchReviewIds.value.filter((value) => ids.has(value));
@@ -907,7 +969,7 @@ onUnmounted(() => {
     <header class="review-page-header">
       <div class="review-page-title">
         <h1 id="review-center-title">例外處理</h1>
-        <p>只有無法安全自動決定的項目才會出現在這裡</p>
+        <p>需要決定 {{ humanRequiredReviewCount }} · 自動處理 {{ automaticReviewCount }}</p>
       </div>
       <button type="button" class="review-refresh" :disabled="loading" @click="emit('refresh')">
         {{ loading ? "更新中…" : "重新整理" }}
@@ -916,7 +978,7 @@ onUnmounted(() => {
 
     <nav class="review-state-tabs" aria-label="審核狀態">
       <button type="button" :class="{ active: query.state === 'needs_action' }" @click="setState('needs_action')">
-        等你處理 <b>{{ stateCounts.needs_action || 0 }}</b>
+        需要決定 <b>{{ humanRequiredReviewCount }}</b>
       </button>
       <button type="button" :class="{ active: query.state === 'processing' }" @click="setState('processing')">
         處理中 <b>{{ stateCounts.processing || 0 }}</b>
@@ -932,7 +994,7 @@ onUnmounted(() => {
         <input
           v-model="searchInput"
           type="search"
-          aria-label="搜尋人工審核"
+          aria-label="搜尋例外項目"
           placeholder="搜尋作品、檔名或問題"
           autocomplete="off"
         />
@@ -943,6 +1005,14 @@ onUnmounted(() => {
           <b v-if="query.kind || query.sort !== 'priority'">已套用</b>
         </summary>
         <div class="review-filter-fields">
+          <label v-if="query.state === 'needs_action'">
+            <span>顯示</span>
+            <select :value="reviewScope" @change="setReviewScope($event.target.value)">
+              <option value="human">需要決定</option>
+              <option value="automatic">自動處理</option>
+              <option value="all">全部</option>
+            </select>
+          </label>
           <label>
             <span>類型</span>
             <select :value="query.kind" @change="setKind($event.target.value)">
@@ -960,6 +1030,14 @@ onUnmounted(() => {
               <option value="oldest">等待最久</option>
             </select>
           </label>
+          <button
+            v-if="query.state === 'needs_action' && reviewScope !== 'human'"
+            type="button"
+            class="review-batch-mode-toggle"
+            @click="toggleBatchMode"
+          >
+            {{ batchMode ? "結束批次選取" : "開啟批次選取" }}
+          </button>
         </div>
       </details>
     </div>
@@ -973,7 +1051,7 @@ onUnmounted(() => {
     <div class="review-workbench">
       <section class="review-inbox" aria-label="審核待辦清單">
         <div v-if="items.length" class="review-inbox-heading">
-          <label>
+          <label v-if="batchMode">
             <input
               type="checkbox"
               :checked="allVisibleBatchSelected"
@@ -982,7 +1060,7 @@ onUnmounted(() => {
               @change="toggleAllVisible"
             />
           </label>
-          <span>顯示 {{ items.length }} / {{ payload.total || items.length }}</span>
+          <span>顯示 {{ items.length }} / {{ currentScopeTotal }}</span>
         </div>
 
         <div v-if="loading && !items.length" class="review-list-skeleton" aria-label="正在載入">
@@ -990,8 +1068,10 @@ onUnmounted(() => {
         </div>
         <div v-else-if="!items.length" class="review-empty-state">
           <span>✓</span>
-          <strong>{{ query.state === 'resolved' ? '沒有已處理紀錄' : '這個清單已處理完畢' }}</strong>
-          <p>變更篩選條件，或等待 Worker 產生新的審核項目。</p>
+          <strong v-if="query.state === 'needs_action' && payload.next_cursor">目前頁面沒有符合這個檢視的項目</strong>
+          <strong v-else>{{ query.state === 'resolved' ? '沒有已處理紀錄' : '這個清單已處理完畢' }}</strong>
+          <p v-if="query.state === 'needs_action' && payload.next_cursor">可載入更多，或切換其他檢視。</p>
+          <p v-else>變更篩選條件，或等待 Worker 產生新的例外項目。</p>
         </div>
 
         <div v-else class="review-inbox-list" role="list">
@@ -999,9 +1079,10 @@ onUnmounted(() => {
             v-for="item in items"
             :key="item.review_id"
             :class="['review-row', { selected: selectedReviewId === item.review_id }]"
+            :style="{ gridTemplateColumns: batchMode ? undefined : 'minmax(0, 1fr)' }"
             role="listitem"
           >
-            <label class="review-row-check" @click.stop>
+            <label v-if="batchMode" class="review-row-check" @click.stop>
               <input
                 type="checkbox"
                 :checked="batchReviewIds.includes(String(item.review_id))"
@@ -1157,8 +1238,6 @@ onUnmounted(() => {
             <div>
               <strong>{{ operationTitle(selectedItem) }}</strong>
               <p>{{ operationDescription(selectedItem) }}</p>
-              <small v-if="operationIsActive(selectedItem)">可以安全離開此頁，背景操作不會中斷。</small>
-              <small v-else-if="operationStatus(selectedItem) === 'failed'">修正選擇後可直接在本頁重試。</small>
             </div>
             <div v-if="operationCanReturnToInbox(selectedItem)" class="review-operation-actions">
               <button v-if="operationMode(selectedItem) !== 'dismiss'" type="button" class="primary-review-action" @click="openRelatedWork(selectedItem)">
@@ -1344,7 +1423,7 @@ onUnmounted(() => {
             <div class="review-secondary-action-body">
               <div>
                 <strong>不再處理這筆待辦</strong>
-                <p>只會移除這筆人工審核並記住不要再次提醒；影片、字幕與 qBittorrent torrent 都不會被刪除。</p>
+                <p>只會移除這筆例外待辦並記住不要再次提醒；影片、字幕與 qBittorrent torrent 都不會被刪除。</p>
               </div>
               <button
                 type="button"
@@ -1359,8 +1438,6 @@ onUnmounted(() => {
 
           </div>
           <footer v-if="selectedItem.state !== 'resolved'" class="review-detail-actions">
-            <span v-if="operationIsActive(selectedItem)">不必離開此頁，處理狀態與結果會自動更新。</span>
-            <span v-else-if="operationCanReturnToInbox(selectedItem)">後續工作已排入佇列，可直接查看處理進度。</span>
             <div class="review-detail-action-buttons">
               <button
                 v-if="selectedItem.kind === 'target_ambiguity' && candidateList(selectedItem).length"

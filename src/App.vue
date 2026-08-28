@@ -113,6 +113,17 @@ const tasks = computed(() => taskPayload.value.tasks || []);
 const completedTasks = computed(() => taskPayload.value.recent_completed || []);
 const openReviews = computed(() => groupReviewItems(reviewPayload.value.items || []));
 const openReviewCount = computed(() => Number(reviewPayload.value?.state_counts?.open ?? openReviews.value.length));
+const humanRequiredReviewCount = computed(() => {
+  const counts = reviewPayload.value?.state_counts || {};
+  const preferred = counts.human_required === null
+    || counts.human_required === undefined
+    || counts.human_required === ""
+    ? Number.NaN
+    : Number(counts.human_required);
+  if (Number.isFinite(preferred) && preferred >= 0) return preferred;
+  const fallback = Number(counts.needs_action ?? counts.open ?? openReviews.value.length);
+  return Number.isFinite(fallback) && fallback >= 0 ? fallback : 0;
+});
 const queueCounts = computed(() => {
   const live = status.value?.queue_counts || {};
   return Object.keys(live).length ? live : (taskPayload.value.counts || {});
@@ -154,6 +165,13 @@ const failedHealthChecks = computed(() => healthChecks.value.filter((check) => !
 const mikanOperation = computed(() => status.value?.mikan || {});
 const aiControl = computed(() => status.value?.ai_control || { paused: false });
 const aiPaused = computed(() => Boolean(aiControl.value.paused));
+const routineDeploymentPause = computed(() => Boolean(
+  aiPaused.value
+  && (
+    status.value?.deployment_hold?.active
+    || String(aiControl.value.requested_by || "").trim().toLowerCase() === "safe-stack-update"
+  )
+));
 const aiScheduler = computed(() => status.value?.ai_scheduler || { exists: false, state: "unavailable" });
 const aiSchedulerNeedsAttention = computed(() => Boolean(aiScheduler.value.problem));
 const aiSchedulerRetryIn = computed(() => {
@@ -489,11 +507,6 @@ const deduplicatedCoreAttentionCount = computed(() => {
   const value = Number(rawValue);
   return Number.isFinite(value) ? value : null;
 });
-const openAttentionReviewCount = computed(() => (
-  failureReviewOverlap.value.available
-    ? Number(failureReviewOverlap.value.open_total || 0)
-    : openReviewCount.value
-));
 const reviewedAiFailureCount = computed(() => (
   deduplicatedCoreAttentionCount.value === null
     ? 0
@@ -548,6 +561,9 @@ const aiStandbyMessage = computed(() => {
   if (aiSchedulerNeedsAttention.value) {
     return aiSchedulerProblemDetail.value;
   }
+  if (routineDeploymentPause.value) {
+    return `安全更新中，${count} 筆工作保留中。`;
+  }
   if (aiPaused.value) {
     return `AI 已暫停，${count} 筆工作保留中。`;
   }
@@ -581,6 +597,15 @@ const healthState = computed(() => {
       label: "AI 任務可能卡住",
       tone: "danger",
       detail: `目前任務已超過 ${formatDuration(activeTask.value.stale_after_seconds || 0)} 沒有更新。`,
+    };
+  }
+  if (routineDeploymentPause.value) {
+    return {
+      label: "安全更新中",
+      tone: "warn",
+      detail: activeTask.value
+        ? "目前影片會處理完成；更新期間暫停領取下一部。"
+        : "更新期間暫停領取新影片，完成後會自動恢復。",
     };
   }
   if (aiPaused.value) {
@@ -870,7 +895,12 @@ const resourceStats = computed(() => {
 
 const overviewPrimaryStats = computed(() => [
   { label: "正在處理", value: processingCount.value, detail: "下載、提取與 AI", tone: "running" },
-  { label: "等待處理", value: waitingCount.value, detail: "已排入自動流程", tone: "queued" },
+  ...(activeTask.value && waitingCount.value > 0 ? [{
+    label: "等待處理",
+    value: waitingCount.value,
+    detail: "已排入自動流程",
+    tone: "queued",
+  }] : []),
   {
     label: "24 小時完成",
     value: Number(etaSummary.value.completed_last_24h || 0),
@@ -898,9 +928,8 @@ const overviewDetailStats = computed(() => [
 ]);
 
 const attentionItems = computed(() => [
-  { label: "待審核", value: openAttentionReviewCount.value, panel: "reviews" },
+  { label: "需要你決定", value: humanRequiredReviewCount.value, panel: "reviews" },
   { label: "AI 失敗", value: unreviewedAiFailureCount.value, panel: "queue", taskStatus: "failed_retry" },
-  { label: "AI／ASR 待確認", value: Number(queueCounts.value.paused || 0), panel: "queue", taskStatus: "paused" },
   { label: "媒體缺失", value: attentionSummary.value.targetMissing, panel: "downloads", mikanStatus: "target_missing" },
   { label: "提取失敗", value: unreviewedTerminalExtractCount.value, panel: "downloads", mikanStatus: "terminal_failed" },
 ].filter((item) => item.value > 0));
@@ -928,7 +957,7 @@ const pages = computed(() => [
     count: mikanPipeline.value.downloading + mikanPipeline.value.extracting + mikanPipeline.value.waitingExtract,
   },
   { key: "queue", label: "AI 字幕", icon: "AI", count: (queueCounts.value.running || 0) + (queueCounts.value.queued || 0) },
-  { key: "reviews", label: "人工審核", icon: "✓", count: openReviewCount.value },
+  { key: "reviews", label: "例外", icon: "✓", count: humanRequiredReviewCount.value },
   { key: "series", label: "作品資訊", icon: "書", count: Number(seriesPayload.value.total || 0) },
   { key: "actions", label: "系統工具", icon: "⚙", count: actionBusy.value ? 1 : 0 },
   { key: "events", label: "處理紀錄", icon: "≡", count: 0 },
@@ -945,6 +974,7 @@ const streamLabel = computed(() => ({
   live: "即時連線",
   retrying: "重新連線中",
   connecting: "連線中",
+  paused: "背景暫停",
   unsupported: "定時更新",
 }[streamState.value] || "定時更新"));
 
@@ -1181,7 +1211,7 @@ async function loadReviews({ preserveOrder = true, append = false, supersede = t
     }
   } catch (err) {
     if (err?.name !== "AbortError" && requestId === reviewRequestId) {
-      error.value = friendlyApiError("讀取人工審核", err);
+      error.value = friendlyApiError("讀取例外項目", err);
     }
   } finally {
     if (requestId === reviewRequestId) {
@@ -2151,7 +2181,7 @@ async function resolveReviewBatch({ reviewIds, action = "safe.default" }) {
       error: err instanceof Error ? err.message : String(err),
       finished_at: Date.now() / 1000,
     }));
-    error.value = friendlyApiError("批次處理人工審核", err);
+    error.value = friendlyApiError("批次處理例外項目", err);
   }
 }
 
@@ -2217,17 +2247,34 @@ function handleHashChange() {
 }
 
 function handleVisibilityChange() {
-  if (!document.hidden) scheduleRefresh(true);
+  if (document.hidden) {
+    stream?.close();
+    stream = null;
+    streamState.value = "paused";
+    return;
+  }
+  connectStream();
+  scheduleRefresh(true);
 }
 
 function connectStream() {
+  if (document.hidden) {
+    streamState.value = "paused";
+    return;
+  }
+  if (stream) return;
   if (!window.EventSource) {
     streamState.value = "unsupported";
     return;
   }
-  stream = new EventSource("/api/v2/stream");
-  stream.onopen = () => { streamState.value = "live"; };
-  stream.addEventListener("revision", (event) => {
+  streamState.value = "connecting";
+  const nextStream = new EventSource("/api/v2/stream");
+  stream = nextStream;
+  nextStream.onopen = () => {
+    if (stream === nextStream) streamState.value = "live";
+  };
+  nextStream.addEventListener("revision", (event) => {
+    if (stream !== nextStream) return;
     try {
       const changed = JSON.parse(event.data || "{}").changed || [];
       if (changed.includes("reviews") && activePanel.value === "reviews") loadReviews();
@@ -2239,9 +2286,11 @@ function connectStream() {
     }
   });
   // Retain the v1 event listener during the compatibility window.
-  stream.addEventListener("state", () => scheduleRefresh(false));
-  stream.onerror = () => {
-    streamState.value = "retrying";
+  nextStream.addEventListener("state", () => {
+    if (stream === nextStream) scheduleRefresh(false);
+  });
+  nextStream.onerror = () => {
+    if (stream === nextStream) streamState.value = "retrying";
     // EventSource reconnects automatically. The 30-second poll remains as a
     // fallback while the connection is recovering.
   };
@@ -2286,6 +2335,7 @@ onUnmounted(() => {
   if (refreshTimer) window.clearTimeout(refreshTimer);
   if (toastTimer) window.clearTimeout(toastTimer);
   stream?.close();
+  stream = null;
   downloadController?.abort();
   taskController?.abort();
   reviewController?.abort();
@@ -2457,7 +2507,7 @@ onUnmounted(() => {
 
           <details
             class="overview-detail-drawer runtime-drawer"
-            :open="aiPaused || ['running', 'paused'].includes(aiFailedRetrySweep.state) || Boolean(redownloadActive)"
+            :open="(aiPaused && !routineDeploymentPause) || ['running', 'paused'].includes(aiFailedRetrySweep.state) || Boolean(redownloadActive)"
           >
             <summary>
               <span>
@@ -2541,7 +2591,7 @@ onUnmounted(() => {
                 <h2>{{ aiSweepStateLabel }}</h2>
                 <p>
                   每次只處理 1 筆可證明為暫時性失敗的工作，不重設嘗試次數；
-                  品質或配對歧義會轉交人工審核，首個失敗即停。
+                  品質或配對歧義會轉入例外清單，首個失敗即停。
                 </p>
                 <small v-if="aiFailedRetrySweep.campaign_id">
                   本輪 {{ aiSweepCounters.processed || 0 }} / {{ aiSweepCounters.selected || 0 }} ·

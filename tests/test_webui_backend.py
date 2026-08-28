@@ -6195,6 +6195,81 @@ class WebuiBackendTests(unittest.TestCase):
         self.assertEqual(command["parameters"]["remediation"], "ai.retranslate_lines")
         self.assertEqual(command["parameters"]["lines"], "3")
 
+    def test_v2_review_state_counts_partition_needs_action_by_batch_eligibility(self) -> None:
+        anime_root = self.tmp / "anime"
+        video = anime_root / "Series" / "Episode.mkv"
+        video.parent.mkdir(parents=True)
+        video.write_bytes(b"")
+        self._write_quality_review(
+            review_id="review_" + "8" * 24,
+            video=video,
+            diagnosis={"reports": [{"issues": [{"code": "prompt_leak", "indexes": [3]}]}]},
+        )
+        self._write_target_review(
+            review_id="review_" + "9" * 24,
+            candidates=[],
+        )
+        config = {"input_path": str(anime_root), "work_path": str(self.module.WORK_PATH)}
+
+        with patch.object(self.module, "_load_config", return_value=config):
+            response = self.module.v2_review_items(view="summary", state="needs_action")
+
+        counts = response["state_counts"]
+        self.assertEqual(counts["open"], 2)
+        self.assertEqual(counts["needs_action"], 2)
+        self.assertEqual(counts["processing"], 0)
+        self.assertEqual(counts["resolved"], 0)
+        self.assertEqual(counts["automatic_safe"], 1)
+        self.assertEqual(counts["human_required"], 1)
+        self.assertEqual(
+            counts["automatic_safe"] + counts["human_required"],
+            counts["needs_action"],
+        )
+
+    def test_review_automation_counts_cache_reuses_same_key_and_recomputes_changed_state(self) -> None:
+        config = {"work_path": str(self.module.WORK_PATH)}
+        with patch.object(
+            self.module,
+            "_review_automation_counts_uncached",
+            return_value={"automatic_safe": 1, "human_required": 1},
+        ) as calculate:
+            first = self.module._review_automation_counts(
+                config,
+                active_queue_targets={"/anime/active.mkv"},
+                needs_action_count=2,
+            )
+            repeated = self.module._review_automation_counts(
+                config,
+                active_queue_targets={"/anime/active.mkv"},
+                needs_action_count=2,
+            )
+            changed = self.module._review_automation_counts(
+                config,
+                active_queue_targets={"/anime/other.mkv"},
+                needs_action_count=2,
+            )
+
+        self.assertEqual(first, {"automatic_safe": 1, "human_required": 1})
+        self.assertEqual(repeated, first)
+        self.assertEqual(changed, first)
+        self.assertEqual(calculate.call_count, 2)
+        self.assertEqual(self.module.REVIEW_AUTOMATION_COUNTS_CACHE_TTL_SECONDS, 5.0)
+
+    def test_review_automation_counts_cache_fails_closed(self) -> None:
+        config = {"work_path": str(self.module.WORK_PATH)}
+        with patch.object(
+            self.module,
+            "_review_automation_counts_uncached",
+            side_effect=RuntimeError("review scan failed"),
+        ):
+            counts = self.module._review_automation_counts(
+                config,
+                active_queue_targets=set(),
+                needs_action_count=3,
+            )
+
+        self.assertEqual(counts, {"automatic_safe": 0, "human_required": 3})
+
     def test_v2_batch_review_preflights_mixed_actions_without_partial_queue(self) -> None:
         anime_root = self.tmp / "anime"
         translate_video = anime_root / "Series" / "Translate.mkv"

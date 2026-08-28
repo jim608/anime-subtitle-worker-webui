@@ -104,6 +104,8 @@ _VERSION_SUMMARY_CACHE: dict[str, Any] = {}
 _HEALTH_SUMMARY_CACHE: dict[str, Any] = {}
 _OPEN_REVIEW_COUNT_CACHE: dict[str, Any] = {}
 _DISK_SUMMARY_CACHE: dict[str, Any] = {}
+_REVIEW_AUTOMATION_COUNTS_CACHE: dict[tuple[str, int, str], dict[str, Any]] = {}
+_REVIEW_AUTOMATION_COUNTS_CACHE_LOCK = threading.Lock()
 _RESOURCE_TELEMETRY_CACHE: dict[str, Any] = {
     "expires_at": 0.0,
     "refreshing": False,
@@ -134,6 +136,7 @@ DATABASE_HEALTH_CACHE_TTL_SECONDS = 60.0
 FAST_WORKER_SUMMARY_CACHE_TTL_SECONDS = 15.0
 SQLITE_DOWNLOADS_CACHE_TTL_SECONDS = 3.0
 SUBTITLE_FILE_PROBE_CACHE_TTL_SECONDS = 60.0
+REVIEW_AUTOMATION_COUNTS_CACHE_TTL_SECONDS = 5.0
 AI_CONTROL_NAME = "ai_control.json"
 AI_SCHEDULER_STATE_NAME = "ai_scheduler_state.json"
 DEPLOYMENT_HOLD_NAME = "deployment_hold.json"
@@ -1077,23 +1080,7 @@ def v2_review_items(
         sort=normalized_sort,
         active_queue_targets=active_queue_targets,
     )
-    items = [_prepare_review_item(item, config=config) for item in items]
-    commands = review_command_states(
-        _control_state_db_path(config),
-        [str(item.get("review_id") or "") for item in items],
-        inbox=_control_inbox_dir(config),
-    )
-    queue_states = review_queue_states(
-        WORK_PATH / "scanner_state.sqlite3",
-        [str(command.get("target") or "") for command in commands.values()],
-    )
-    for item in items:
-        command = commands.get(str(item.get("review_id") or ""))
-        _attach_review_action_state(
-            item,
-            command,
-            queue_state=queue_states.get(str((command or {}).get("target") or ""), {}),
-        )
+    items = _prepare_review_items_with_action_state(items, config=config)
     if normalized_view == "summary":
         items = [_review_summary_payload(item) for item in items]
     next_offset = offset + len(items)
@@ -1101,7 +1088,10 @@ def v2_review_items(
         "items": items,
         "total": total,
         "next_cursor": _encode_cursor(next_offset) if next_offset < total else None,
-        "state_counts": _review_state_counts(config),
+        "state_counts": _review_state_counts(
+            config,
+            active_queue_targets=active_queue_targets,
+        ),
         "query": {
             "state": normalized_state or ("resolved" if str(status).casefold() == "resolved" else "needs_action"),
             "kind": str(kind or ""),
@@ -1507,10 +1497,124 @@ def _attach_review_action_state(
     item["batch_eligible"] = bool(_safe_batch_review_body(item))
 
 
-def _review_state_counts(config: dict[str, Any]) -> dict[str, int]:
+def _prepare_review_items_with_action_state(
+    items: list[dict[str, Any]],
+    *,
+    config: dict[str, Any],
+) -> list[dict[str, Any]]:
+    prepared = [_prepare_review_item(item, config=config) for item in items]
+    if not prepared:
+        return prepared
+    commands = review_command_states(
+        _control_state_db_path(config),
+        [str(item.get("review_id") or "") for item in prepared],
+        inbox=_control_inbox_dir(config),
+    )
+    queue_states = review_queue_states(
+        WORK_PATH / "scanner_state.sqlite3",
+        [str(command.get("target") or "") for command in commands.values()],
+    )
+    for item in prepared:
+        command = commands.get(str(item.get("review_id") or ""))
+        _attach_review_action_state(
+            item,
+            command,
+            queue_state=queue_states.get(str((command or {}).get("target") or ""), {}),
+        )
+    return prepared
+
+
+def _review_automation_counts(
+    config: dict[str, Any],
+    *,
+    active_queue_targets: set[str],
+    needs_action_count: int,
+) -> dict[str, int]:
+    database = _control_state_db_path(config)
+    try:
+        database_key = str(database.resolve())
+    except OSError:
+        database_key = str(database)
+    targets_payload = "\0".join(sorted(str(target) for target in active_queue_targets if str(target)))
+    targets_digest = hashlib.sha256(targets_payload.encode("utf-8", errors="replace")).hexdigest()
+    cache_key = (database_key, int(needs_action_count), targets_digest)
+
+    # Hold the lock across the first calculation so concurrent SSE/page
+    # requests do not all perform the same multi-page review scan.
+    with _REVIEW_AUTOMATION_COUNTS_CACHE_LOCK:
+        cached = _ttl_cache_get(
+            _REVIEW_AUTOMATION_COUNTS_CACHE,
+            cache_key,
+            REVIEW_AUTOMATION_COUNTS_CACHE_TTL_SECONDS,
+        )
+        if isinstance(cached, dict):
+            return {
+                "automatic_safe": int(cached.get("automatic_safe") or 0),
+                "human_required": int(cached.get("human_required") or 0),
+            }
+        try:
+            result = _review_automation_counts_uncached(
+                config,
+                active_queue_targets=active_queue_targets,
+                needs_action_count=needs_action_count,
+            )
+        except Exception:  # noqa: BLE001 - summary statistics must fail closed.
+            result = {
+                "automatic_safe": 0,
+                "human_required": max(0, int(needs_action_count)),
+            }
+        if len(_REVIEW_AUTOMATION_COUNTS_CACHE) >= 64 and cache_key not in _REVIEW_AUTOMATION_COUNTS_CACHE:
+            _REVIEW_AUTOMATION_COUNTS_CACHE.clear()
+        _ttl_cache_set(_REVIEW_AUTOMATION_COUNTS_CACHE, cache_key, dict(result))
+        return dict(result)
+
+
+def _review_automation_counts_uncached(
+    config: dict[str, Any],
+    *,
+    active_queue_targets: set[str],
+    needs_action_count: int,
+) -> dict[str, int]:
+    """Partition needs-action reviews without executing any remediation."""
+
+    automatic_safe = 0
+    offset = 0
+    while offset < needs_action_count:
+        items, total = list_reviews(
+            _control_state_db_path(config),
+            status="open",
+            kind="",
+            limit=min(200, needs_action_count - offset),
+            offset=offset,
+            state="needs_action",
+            active_queue_targets=active_queue_targets,
+        )
+        if not items:
+            break
+        prepared = _prepare_review_items_with_action_state(items, config=config)
+        automatic_safe += sum(bool(item.get("batch_eligible")) for item in prepared)
+        offset += len(items)
+        if offset >= int(total or 0):
+            break
+
+    # Concurrent review changes or a read failure must never overstate what is
+    # safe to automate. Any unclassified remainder stays human-required.
+    automatic_safe = min(needs_action_count, automatic_safe)
+    return {
+        "automatic_safe": automatic_safe,
+        "human_required": max(0, needs_action_count - automatic_safe),
+    }
+
+
+def _review_state_counts(
+    config: dict[str, Any],
+    *,
+    active_queue_targets: set[str] | None = None,
+) -> dict[str, int]:
     database = _control_state_db_path(config)
     counts = review_state_counts(database)
-    active_queue_targets = review_active_queue_targets(WORK_PATH / "scanner_state.sqlite3")
+    if active_queue_targets is None:
+        active_queue_targets = review_active_queue_targets(WORK_PATH / "scanner_state.sqlite3")
     _items, processing = list_reviews(
         database,
         status="open",
@@ -1522,10 +1626,17 @@ def _review_state_counts(config: dict[str, Any]) -> dict[str, int]:
     )
     open_count = int(counts.get("open") or 0)
     processing_count = min(open_count, int(processing or 0))
+    needs_action_count = max(0, open_count - processing_count)
+    automation_counts = _review_automation_counts(
+        config,
+        active_queue_targets=active_queue_targets,
+        needs_action_count=needs_action_count,
+    )
     return {
         **counts,
-        "needs_action": max(0, open_count - processing_count),
+        "needs_action": needs_action_count,
         "processing": processing_count,
+        **automation_counts,
     }
 
 
