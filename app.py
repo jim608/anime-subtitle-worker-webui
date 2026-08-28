@@ -150,6 +150,7 @@ AI_DELIVERY_PUBLICATION_CONTRACT = "ai-publication-semantics-v2"
 AI_INVENTORY_SCHEMA_VERSION = 1
 AI_INVENTORY_MAX_AGE_SECONDS = 28_800
 AI_INVENTORY_RUNNING_STALE_SECONDS = 7_200
+AI_INVENTORY_CLOCK_SKEW_TOLERANCE_SECONDS = 1.0
 AI_DELIVERY_ANYTIME_ALPHA = 0.05
 AI_DELIVERY_ANYTIME_LOG_THRESHOLD = math.log(1.0 / AI_DELIVERY_ANYTIME_ALPHA)
 AI_DELIVERY_ANYTIME_BETTING_FRACTIONS = (0.5, 0.9)
@@ -10101,6 +10102,16 @@ def _ai_inventory_coverage(
         epoch_state = str(latest_scope_epoch[1] or "").strip().casefold()
         updated_at = float(latest_scope_epoch[3] or 0)
         age_seconds = observed_at - updated_at if updated_at > 0 else None
+        # ``observed_at`` is captured before the read-only SQLite query.  The
+        # Worker can commit a fresh heartbeat while this request is reading,
+        # making the fetched timestamp fractionally newer than that snapshot.
+        # Clamp only this bounded race; materially future timestamps remain
+        # fail-closed below.
+        if (
+            age_seconds is not None
+            and -AI_INVENTORY_CLOCK_SKEW_TOLERANCE_SECONDS <= age_seconds < 0
+        ):
+            age_seconds = 0.0
         if epoch_state == "running":
             running_stale = bool(
                 age_seconds is None

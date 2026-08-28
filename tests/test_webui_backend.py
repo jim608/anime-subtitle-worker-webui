@@ -4926,6 +4926,48 @@ class WebuiBackendTests(unittest.TestCase):
             "matching_epoch_running_stale",
         )
 
+    def test_ai_delivery_slo_tolerates_fractionally_future_running_heartbeat(self) -> None:
+        database = self.module.WORK_PATH / "scanner_state.sqlite3"
+        now = 2_000_000_000.0
+        with sqlite3.connect(database) as connection:
+            self._create_ai_delivery_slo_schema(
+                connection,
+                instrumented_at=now - 100,
+                inventory_completed_at=now - 90,
+            )
+            connection.execute("DELETE FROM ai_inventory_epochs")
+            connection.execute(
+                """
+                INSERT INTO ai_inventory_epochs(
+                    epoch_id, schema_version, measurement_revision,
+                    policy_revision, root_signature, state,
+                    started_at, updated_at, completed_at
+                ) VALUES ('running-race', 1, ?, 'policy-v1', 'root-v1',
+                          'running', ?, ?, 0)
+                """,
+                (
+                    self.module.AI_DELIVERY_MEASUREMENT_REVISION,
+                    now - 50,
+                    now + self.module.AI_INVENTORY_CLOCK_SKEW_TOLERANCE_SECONDS / 2,
+                ),
+            )
+
+        running = self.module._ai_delivery_slo_summary(now=now)
+
+        self.assertEqual(running["coverage_inventory_state"], "inventory_running")
+        self.assertEqual(running["coverage_inventory_reason"], "matching_epoch_running")
+        self.assertEqual(running["coverage_inventory_age_seconds"], 0.0)
+
+        with sqlite3.connect(database) as connection:
+            connection.execute(
+                "UPDATE ai_inventory_epochs SET updated_at=? WHERE epoch_id='running-race'",
+                (now + self.module.AI_INVENTORY_CLOCK_SKEW_TOLERANCE_SECONDS + 1,),
+            )
+
+        future = self.module._ai_delivery_slo_summary(now=now)
+        self.assertEqual(future["coverage_inventory_state"], "inventory_running_stale")
+        self.assertEqual(future["coverage_inventory_reason"], "matching_epoch_running_stale")
+
     def test_ai_delivery_slo_rejects_inventory_dirtied_after_completed_epoch(self) -> None:
         database = self.module.WORK_PATH / "scanner_state.sqlite3"
         now = 2_000_000_000.0
