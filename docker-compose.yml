@@ -1,0 +1,23 @@
+services:
+  anime-subtitle-worker-webui:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: anime-subtitle-worker-webui:latest
+    pull_policy: never
+    container_name: anime-subtitle-worker-webui
+    restart: unless-stopped
+    ports:
+      - "8765:8765"
+    volumes:
+      - /mnt/user/appdata/anime-subtitle-worker/config.yaml:/config/config.yaml
+      - /mnt/user/appdata/anime-subtitle-worker/work:/work
+      - /mnt/user/appdata/anime-subtitle-worker/logs:/logs
+      - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      CONFIG_PATH: /config/config.yaml
+      WORK_PATH: /work
+      LOG_PATH: /logs
+      WORKER_CONTAINER_NAME: anime-subtitle-worker
+      WEBUI_USERNAME: ""
+      WEBUI_PASSWORD: ""
