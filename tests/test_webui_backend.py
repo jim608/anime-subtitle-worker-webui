@@ -5827,6 +5827,7 @@ class WebuiBackendTests(unittest.TestCase):
         review_id: str,
         video: Path,
         diagnosis: dict | None = None,
+        candidates: list[dict] | None = None,
         status: str = "open",
     ) -> None:
         database = self.module.WORK_PATH / "control_state.sqlite3"
@@ -5856,9 +5857,9 @@ class WebuiBackendTests(unittest.TestCase):
                 INSERT INTO review_items(
                     review_id, kind, target_key, severity, summary,
                     diagnosis_json, candidates_json, status, created_at, updated_at
-                ) VALUES (?, 'subtitle_quality', ?, 'error', 'Translation quality failed', ?, '[]', ?, 1, 1)
+                ) VALUES (?, 'subtitle_quality', ?, 'error', 'Translation quality failed', ?, ?, ?, 1, 1)
                 """,
-                (review_id, str(video), json.dumps(payload), status),
+                (review_id, str(video), json.dumps(payload), json.dumps(candidates or []), status),
             )
 
     def test_v2_review_summary_is_compact_and_detail_deduplicates_quality_issues(self) -> None:
@@ -5891,6 +5892,11 @@ class WebuiBackendTests(unittest.TestCase):
                     "size": 456,
                 },
             },
+            candidates=[{
+                "action": "ai.retranslate_lines",
+                "label": "Re-translate only failed lines",
+                "lines": "7",
+            }],
         )
         config = {"input_path": str(anime_root), "work_path": str(self.module.WORK_PATH)}
 
@@ -5911,6 +5917,55 @@ class WebuiBackendTests(unittest.TestCase):
         reports = detail["item"]["diagnosis"]["reports"]
         self.assertEqual(sum(len(report["issues"]) for report in reports), 1)
         self.assertEqual(detail["item"]["diagnosis"]["line_previews"][0]["source_ja"], "ありがとう")
+
+    def test_source_quality_report_uses_retranscribe_candidate_not_line_indexes(self) -> None:
+        anime_root = self.tmp / "anime"
+        video = anime_root / "Series" / "Season 1" / "Series - S01E09.mkv"
+        video.parent.mkdir(parents=True)
+        video.write_bytes(b"")
+        review_id = "review_" + "1" * 24
+        self._write_quality_review(
+            review_id=review_id,
+            video=video,
+            diagnosis={
+                "reports": [{
+                    "path": "/work/ai_publish_staging/example/ja.ass",
+                    "role": "unknown",
+                    "issues": [{"code": "cps_too_high", "indexes": [1]}],
+                }],
+            },
+            candidates=[
+                {"action": "ai.retranslate", "label": "Re-translate"},
+                {"action": "ai.retranscribe", "label": "Re-transcribe"},
+            ],
+        )
+        config = {"input_path": str(anime_root), "work_path": str(self.module.WORK_PATH)}
+
+        with patch.object(self.module, "_load_config", return_value=config):
+            item = self.module.v2_review_item_detail(review_id)["item"]
+
+        self.assertEqual(item["recommended_action"]["action"], "ai.retranscribe")
+        self.assertTrue(item["batch_eligible"])
+
+    def test_translation_quality_requires_explicit_line_candidate(self) -> None:
+        item = {
+            "kind": "subtitle_quality",
+            "diagnosis": {
+                "reports": [{
+                    "role": "translated_zh_tw",
+                    "issues": [{"code": "cps_too_high", "indexes": [7]}],
+                }],
+            },
+            "candidates": [
+                {"action": "ai.retranslate", "label": "Re-translate"},
+                {"action": "ai.retranscribe", "label": "Re-transcribe"},
+            ],
+        }
+
+        action = self.module._review_recommended_action(item)
+
+        self.assertEqual(action["action"], "ai.retranslate")
+        self.assertTrue(action["safe"])
 
     def test_asr_prompt_echo_quality_review_recommends_retranscription(self) -> None:
         anime_root = self.tmp / "anime"
@@ -6173,6 +6228,7 @@ class WebuiBackendTests(unittest.TestCase):
             review_id=quality_id,
             video=video,
             diagnosis={"reports": [{"issues": [{"code": "prompt_leak", "indexes": [3]}]}]},
+            candidates=[{"action": "ai.retranslate_lines", "lines": "3"}],
         )
         self._write_target_review(review_id=ambiguous_id, candidates=[])
         config = {"input_path": str(anime_root), "work_path": str(self.module.WORK_PATH)}
@@ -6204,6 +6260,7 @@ class WebuiBackendTests(unittest.TestCase):
             review_id="review_" + "8" * 24,
             video=video,
             diagnosis={"reports": [{"issues": [{"code": "prompt_leak", "indexes": [3]}]}]},
+            candidates=[{"action": "ai.retranslate_lines", "lines": "3"}],
         )
         self._write_target_review(
             review_id="review_" + "9" * 24,
@@ -6283,11 +6340,13 @@ class WebuiBackendTests(unittest.TestCase):
             review_id=translate_id,
             video=translate_video,
             diagnosis={"reports": [{"issues": [{"code": "residual_japanese_kana", "indexes": [3]}]}]},
+            candidates=[{"action": "ai.retranslate_lines", "lines": "3"}],
         )
         self._write_quality_review(
             review_id=retranscribe_id,
             video=retranscribe_video,
             diagnosis={"reports": [{"issues": [{"code": "asr_prompt_echo", "indexes": [1]}]}]},
+            candidates=[{"action": "ai.retranscribe"}],
         )
         config = {"input_path": str(anime_root), "work_path": str(self.module.WORK_PATH)}
 

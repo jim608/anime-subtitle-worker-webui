@@ -1277,6 +1277,55 @@ def _review_issue_codes(item: dict[str, Any]) -> set[str]:
     return codes
 
 
+def _review_remediation_candidate(item: dict[str, Any], action: str) -> dict[str, Any] | None:
+    expected = str(action or "").strip().casefold()
+    for candidate in item.get("candidates") or []:
+        if not isinstance(candidate, dict):
+            continue
+        if str(candidate.get("action") or "").strip().casefold() == expected:
+            return candidate
+    return None
+
+
+def _review_candidate_line_indexes(candidate: dict[str, Any] | None) -> list[int]:
+    if not isinstance(candidate, dict):
+        return []
+    raw_indexes = candidate.get("indexes")
+    if isinstance(raw_indexes, list):
+        try:
+            indexes = {int(value) for value in raw_indexes if int(value) > 0}
+        except (TypeError, ValueError):
+            return []
+        return sorted(indexes)[:500]
+    line_spec = str(candidate.get("lines") or "").strip()
+    if not re.fullmatch(r"\d+(?:\s*-\s*\d+)?(?:\s*,\s*\d+(?:\s*-\s*\d+)?)*", line_spec):
+        return []
+    indexes: set[int] = set()
+    for token in line_spec.split(","):
+        bounds = [int(value.strip()) for value in token.split("-", 1)]
+        start, end = (bounds[0], bounds[0]) if len(bounds) == 1 else (bounds[0], bounds[1])
+        if start <= 0 or end < start or end - start > 500:
+            return []
+        indexes.update(range(start, end + 1))
+        if len(indexes) > 500:
+            return []
+    return sorted(indexes)
+
+
+def _review_has_source_quality_issues(item: dict[str, Any]) -> bool:
+    source_roles = {"ja", "japanese", "source", "source_language"}
+    for report in (item.get("diagnosis") or {}).get("reports") or []:
+        if not isinstance(report, dict) or not any(isinstance(issue, dict) for issue in report.get("issues") or []):
+            continue
+        role = str(report.get("role") or report.get("language") or "").strip().casefold().replace("-", "_")
+        if role in source_roles:
+            return True
+        file_name = str(report.get("path") or "").replace("\\", "/").rsplit("/", 1)[-1].casefold()
+        if file_name in {"ja.ass", "ja.srt"} or file_name.endswith((".ja.ass", ".ja.srt")):
+            return True
+    return False
+
+
 def _review_recommended_action(item: dict[str, Any]) -> dict[str, Any]:
     kind = str(item.get("kind") or "")
     if kind == "target_ambiguity":
@@ -1298,27 +1347,49 @@ def _review_recommended_action(item: dict[str, Any]) -> dict[str, Any]:
             "safe": True,
         }
     issue_codes = _review_issue_codes(item)
-    if kind == "subtitle_quality" and issue_codes.intersection(
-        {"asr_prompt_echo", "hallucination_text", "asr_low_confidence", "leading_gap"}
-    ):
+    source_issue = _review_has_source_quality_issues(item) or bool(
+        issue_codes.intersection({"asr_prompt_echo", "hallucination_text", "asr_low_confidence", "leading_gap"})
+    )
+    retranscribe_candidate = _review_remediation_candidate(item, "ai.retranscribe")
+    if kind == "asr_quality":
         return {
             "action": "ai.retranscribe",
-            "label": "重新轉錄並移除錯誤內容",
-            "safe": True,
+            "label": "重新辨識問題片段",
+            "safe": retranscribe_candidate is not None or not (item.get("candidates") or []),
         }
-    indexes = _review_issue_indexes(item)
-    if kind == "subtitle_quality" and indexes:
+    if kind == "subtitle_quality" and source_issue:
+        return {
+            "action": "ai.retranscribe",
+            "label": "重新轉錄並修復日文來源",
+            "safe": retranscribe_candidate is not None,
+        }
+    line_candidate = _review_remediation_candidate(item, "ai.retranslate_lines")
+    candidate_indexes = _review_candidate_line_indexes(line_candidate)
+    reported_indexes = set(_review_issue_indexes(item))
+    if kind == "subtitle_quality" and candidate_indexes and set(candidate_indexes).issubset(reported_indexes):
         return {
             "action": "ai.retranslate_lines",
-            "label": f"重新翻譯 {len(indexes)} 行問題字幕",
-            "indexes": indexes,
+            "label": f"重新翻譯 {len(candidate_indexes)} 行問題字幕",
+            "indexes": candidate_indexes,
             "safe": True,
         }
-    action = "ai.retranscribe" if kind == "asr_quality" else "ai.retranslate"
+    retranslate_candidate = _review_remediation_candidate(item, "ai.retranslate")
+    if kind == "subtitle_quality" and retranslate_candidate is not None:
+        return {
+            "action": "ai.retranslate",
+            "label": "使用日文快取重新翻譯",
+            "safe": True,
+        }
+    if kind == "subtitle_quality" and retranscribe_candidate is not None:
+        return {
+            "action": "ai.retranscribe",
+            "label": "重新轉錄並修復來源",
+            "safe": True,
+        }
     return {
-        "action": action,
-        "label": "重新辨識問題片段" if action == "ai.retranscribe" else "使用日文快取重新翻譯",
-        "safe": True,
+        "action": "ai.retranslate",
+        "label": "需要確認可用的修復方式",
+        "safe": False,
     }
 
 
@@ -1391,6 +1462,8 @@ def _safe_batch_review_body(item: dict[str, Any]) -> dict[str, Any] | None:
     if not target:
         return None
     action = _review_recommended_action(item)
+    if not bool(action.get("safe")):
+        return None
     body: dict[str, Any] = {"action": action["action"], "target": target}
     if action["action"] == "ai.retranslate_lines":
         body["indexes"] = action.get("indexes") or []
