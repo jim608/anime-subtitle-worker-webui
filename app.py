@@ -1312,20 +1312,6 @@ def _review_candidate_line_indexes(candidate: dict[str, Any] | None) -> list[int
     return sorted(indexes)
 
 
-def _review_has_source_quality_issues(item: dict[str, Any]) -> bool:
-    source_roles = {"ja", "japanese", "source", "source_language"}
-    for report in (item.get("diagnosis") or {}).get("reports") or []:
-        if not isinstance(report, dict) or not any(isinstance(issue, dict) for issue in report.get("issues") or []):
-            continue
-        role = str(report.get("role") or report.get("language") or "").strip().casefold().replace("-", "_")
-        if role in source_roles:
-            return True
-        file_name = str(report.get("path") or "").replace("\\", "/").rsplit("/", 1)[-1].casefold()
-        if file_name in {"ja.ass", "ja.srt"} or file_name.endswith((".ja.ass", ".ja.srt")):
-            return True
-    return False
-
-
 def _review_recommended_action(item: dict[str, Any]) -> dict[str, Any]:
     kind = str(item.get("kind") or "")
     if kind == "target_ambiguity":
@@ -1347,7 +1333,7 @@ def _review_recommended_action(item: dict[str, Any]) -> dict[str, Any]:
             "safe": True,
         }
     issue_codes = _review_issue_codes(item)
-    source_issue = _review_has_source_quality_issues(item) or bool(
+    source_issue = bool(
         issue_codes.intersection({"asr_prompt_echo", "hallucination_text", "asr_low_confidence", "leading_gap"})
     )
     retranscribe_candidate = _review_remediation_candidate(item, "ai.retranscribe")
@@ -1371,19 +1357,6 @@ def _review_recommended_action(item: dict[str, Any]) -> dict[str, Any]:
             "action": "ai.retranslate_lines",
             "label": f"重新翻譯 {len(candidate_indexes)} 行問題字幕",
             "indexes": candidate_indexes,
-            "safe": True,
-        }
-    retranslate_candidate = _review_remediation_candidate(item, "ai.retranslate")
-    if kind == "subtitle_quality" and retranslate_candidate is not None:
-        return {
-            "action": "ai.retranslate",
-            "label": "使用日文快取重新翻譯",
-            "safe": True,
-        }
-    if kind == "subtitle_quality" and retranscribe_candidate is not None:
-        return {
-            "action": "ai.retranscribe",
-            "label": "重新轉錄並修復來源",
             "safe": True,
         }
     return {

@@ -5918,7 +5918,7 @@ class WebuiBackendTests(unittest.TestCase):
         self.assertEqual(sum(len(report["issues"]) for report in reports), 1)
         self.assertEqual(detail["item"]["diagnosis"]["line_previews"][0]["source_ja"], "ありがとう")
 
-    def test_source_quality_report_uses_retranscribe_candidate_not_line_indexes(self) -> None:
+    def test_english_audio_ja_path_repeated_cues_fail_closed(self) -> None:
         anime_root = self.tmp / "anime"
         video = anime_root / "Series" / "Season 1" / "Series - S01E09.mkv"
         video.parent.mkdir(parents=True)
@@ -5928,10 +5928,21 @@ class WebuiBackendTests(unittest.TestCase):
             review_id=review_id,
             video=video,
             diagnosis={
+                "audio_selection": {
+                    "selected": {"index": 1, "language": "eng", "default": True},
+                    "streams": [{"index": 1, "language": "eng", "default": True}],
+                },
                 "reports": [{
                     "path": "/work/ai_publish_staging/example/ja.ass",
                     "role": "unknown",
-                    "issues": [{"code": "cps_too_high", "indexes": [1]}],
+                    "issues": [
+                        {"code": "cps_high", "severity": "warn", "indexes": [474, 475, 476, 477, 478]},
+                        {
+                            "code": "repeated_consecutive_cues",
+                            "severity": "fail",
+                            "indexes": [474, 475, 476, 477, 478],
+                        },
+                    ],
                 }],
             },
             candidates=[
@@ -5944,8 +5955,9 @@ class WebuiBackendTests(unittest.TestCase):
         with patch.object(self.module, "_load_config", return_value=config):
             item = self.module.v2_review_item_detail(review_id)["item"]
 
-        self.assertEqual(item["recommended_action"]["action"], "ai.retranscribe")
-        self.assertTrue(item["batch_eligible"])
+        self.assertNotEqual(item["recommended_action"]["action"], "ai.retranscribe")
+        self.assertFalse(item["recommended_action"]["safe"])
+        self.assertFalse(item["batch_eligible"])
 
     def test_translation_quality_requires_explicit_line_candidate(self) -> None:
         item = {
@@ -5965,7 +5977,7 @@ class WebuiBackendTests(unittest.TestCase):
         action = self.module._review_recommended_action(item)
 
         self.assertEqual(action["action"], "ai.retranslate")
-        self.assertTrue(action["safe"])
+        self.assertFalse(action["safe"])
 
     def test_asr_prompt_echo_quality_review_recommends_retranscription(self) -> None:
         anime_root = self.tmp / "anime"
