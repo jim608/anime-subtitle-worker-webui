@@ -194,24 +194,16 @@ function qualityIssueLineSpec(issue) {
     <header class="page-heading queue-page-header">
       <div class="queue-page-title">
         <h1>AI 字幕佇列</h1>
-        <p>自動處理狀態與例外</p>
+        <p>關鍵處理狀態與需要介入的例外</p>
       </div>
       <div class="queue-heading-actions">
-        <div class="queue-summary">
-          <span><b>{{ counts.running || 0 }}</b> 處理中</span>
-          <span><b>{{ counts.queued || 0 }}</b> 等待中</span>
-          <span><b>{{ counts.failed_retry || 0 }}</b> 失敗待重試</span>
-          <span><b>{{ counts.done || 0 }}</b> 完成</span>
+        <div class="queue-summary" aria-label="佇列關鍵狀態">
+          <span class="queue-stat running"><b>{{ counts.running || 0 }}</b> 處理中</span>
+          <span class="queue-stat queued"><b>{{ counts.queued || 0 }}</b> 等待中</span>
+          <span :class="['queue-stat', { danger: counts.failed_retry }]">
+            <b>{{ counts.failed_retry || 0 }}</b> 失敗待重試
+          </span>
         </div>
-        <button
-          type="button"
-          class="queue-control-button"
-          :class="{ primary: aiControl.paused }"
-          :disabled="controlBusy"
-          @click="emit('ai-control', !aiControl.paused)"
-        >
-          {{ controlBusy ? "更新中…" : aiControl.paused ? "恢復 AI 佇列" : "暫停 AI 佇列" }}
-        </button>
         <button
           v-if="counts.failed_retry"
           type="button"
@@ -222,6 +214,21 @@ function qualityIssueLineSpec(issue) {
         >
           {{ retrySweep.state === "running" ? "安全修復中" : `安全處理 1 筆（${counts.failed_retry} 待檢查）` }}
         </button>
+        <details class="queue-utilities">
+          <summary>{{ aiControl.paused ? "AI 已暫停" : "佇列控制" }}</summary>
+          <div>
+            <button
+              type="button"
+              class="queue-control-button"
+              :class="{ primary: aiControl.paused }"
+              :disabled="controlBusy"
+              @click="emit('ai-control', !aiControl.paused)"
+            >
+              {{ controlBusy ? "更新中…" : aiControl.paused ? "恢復 AI 佇列" : "暫停 AI 佇列" }}
+            </button>
+            <small>正常情況由系統自動排程，不需要操作。</small>
+          </div>
+        </details>
       </div>
     </header>
 
@@ -262,13 +269,13 @@ function qualityIssueLineSpec(issue) {
       <article
         v-for="task in visibleTasks"
         :key="task.path"
-        :class="['task-card', { 'is-failed': task.status === 'Failed' }]"
+        :class="['task-card', `task-card--${statusTone(task.status)}`, { 'is-failed': task.status === 'Failed' }]"
       >
         <div class="task-card-main">
           <div class="card-line">
             <span :class="['status-chip', statusTone(task.status)]">{{ plainStatus(task) }}</span>
             <span
-              v-if="task.subtitle_quality && task.status !== 'Failed'"
+              v-if="task.subtitle_quality && task.status !== 'Failed' && task.subtitle_quality.status !== 'watchable'"
               :class="['status-chip', subtitleQualityTone(task.subtitle_quality)]"
             >
               字幕{{ subtitleQualityLabel(task.subtitle_quality) }}
@@ -282,7 +289,7 @@ function qualityIssueLineSpec(issue) {
           <p v-if="task.problem?.requires_user_action && task.status !== 'Failed'" class="recommended-action">
             <strong>建議操作：</strong>{{ problemRecommendedAction(task) }}
           </p>
-          <p v-if="task.subtitle_quality && task.status !== 'Failed'" :class="{ 'warning-text': task.subtitle_quality.status !== 'watchable' }">
+          <p v-if="task.subtitle_quality && task.status !== 'Failed' && task.subtitle_quality.status !== 'watchable'" class="warning-text">
             {{ subtitleQualitySummary(task.subtitle_quality) }}
           </p>
           <div v-if="viewMode === 'active' && task.status !== 'Failed'" :class="['task-progress', { indeterminate: taskProgress(task) === null }]">
@@ -311,7 +318,7 @@ function qualityIssueLineSpec(issue) {
         </div>
 
         <details class="row-details task-card-details">
-          <summary>詳細資料</summary>
+          <summary>技術資料與操作</summary>
           <dl>
             <dt>檔案路徑</dt><dd>{{ task.path }}</dd>
             <dt>更新時間</dt><dd>{{ formatTime(task.completed_at || task.job?.finished_at || task.updated_at) }}</dd>
