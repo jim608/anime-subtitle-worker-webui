@@ -329,6 +329,9 @@ const aiDeliverySlo = computed(() => status.value?.ai_delivery_slo || {
   },
   sample_state: "unavailable",
 });
+const sloEvidenceIncomplete = computed(() => (
+  aiDeliverySlo.value?.rolling_operational?.proof_eligible !== true
+));
 const aiDeliverySloCard = computed(() => {
   const slo = aiDeliverySlo.value;
   const rolling = slo.rolling_operational || {};
@@ -2505,19 +2508,28 @@ onUnmounted(() => {
             </button>
           </section>
 
-          <details
-            class="overview-detail-drawer runtime-drawer"
-            :open="(aiPaused && !routineDeploymentPause) || ['running', 'paused'].includes(aiFailedRetrySweep.state) || Boolean(redownloadActive)"
-          >
+          <details class="overview-detail-drawer runtime-drawer">
             <summary>
               <span>
                 <strong>進階資訊</strong>
                 <small>資源、SLO 與診斷</small>
               </span>
-              <b v-if="aiPaused">AI 已暫停</b>
-              <b v-else-if="['running', 'paused'].includes(aiFailedRetrySweep.state)">{{ aiSweepStateLabel }}</b>
-              <b v-else-if="recommendations.length">{{ recommendations.length }} 項建議</b>
-              <b v-else>展開</b>
+              <span class="overview-detail-summary-state" aria-label="進階狀態摘要">
+                <b v-if="aiPaused">AI 已暫停</b>
+                <b v-if="['running', 'paused'].includes(aiFailedRetrySweep.state)">
+                  {{ aiSweepStateLabel }} · {{ aiSweepCounters.processed || 0 }}/{{ aiSweepCounters.selected || "?" }}
+                </b>
+                <b v-if="redownloadActive">
+                  Mikan 重抓 {{ redownloadActive.current || 0 }}/{{ redownloadActive.total || "?" }}
+                </b>
+                <b v-if="recommendations.length">{{ recommendations.length }} 項建議</b>
+                <b v-if="sloEvidenceIncomplete" class="slo-incomplete">SLO 證據不完整</b>
+                <b
+                  v-if="!aiPaused && !['running', 'paused'].includes(aiFailedRetrySweep.state) && !redownloadActive && !recommendations.length && !sloEvidenceIncomplete"
+                >
+                  展開
+                </b>
+              </span>
             </summary>
             <section class="overview-resource-strip" aria-label="資源使用">
               <strong>資源</strong>

@@ -1004,6 +1004,26 @@ select { width: 100%; padding: 0 0.8rem; }
 .overview-controls-drawer > summary small { color: var(--muted); font-size: 0.7rem; font-weight: 500; }
 .overview-detail-drawer > summary b,
 .overview-controls-drawer > summary b { flex: 0 0 auto; color: var(--blue-bright); font-size: 0.72rem; }
+.overview-detail-drawer > summary > .overview-detail-summary-state {
+  display: flex;
+  min-width: 0;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 0.35rem;
+}
+.overview-detail-summary-state b {
+  border: 1px solid color-mix(in srgb, var(--blue) 35%, var(--line));
+  border-radius: 999px;
+  padding: 0.22rem 0.46rem;
+  background: color-mix(in srgb, var(--blue-soft) 66%, transparent);
+  white-space: nowrap;
+}
+.overview-detail-summary-state b.slo-incomplete {
+  border-color: color-mix(in srgb, var(--yellow) 45%, var(--line));
+  color: var(--yellow);
+  background: color-mix(in srgb, var(--yellow-soft) 70%, transparent);
+}
 .overview-detail-drawer[open] > summary,
 .overview-controls-drawer[open] > summary { border-bottom: 1px solid var(--line); }
 .overview-detail-drawer .overview-stats-detail { margin: 0; padding: 0.85rem; }
@@ -1079,7 +1099,6 @@ select { width: 100%; padding: 0 0.8rem; }
 .overview-stats article,
 .home-card,
 .current-task-card,
-.page-panel,
 .completion-section,
 .tool-section,
 .tool-result {
@@ -1343,7 +1362,13 @@ select { width: 100%; padding: 0 0.8rem; }
   font-weight: 900;
 }
 
-.page-panel { padding: 1.5rem; }
+.page-panel {
+  border: 0;
+  border-radius: 0;
+  padding: 0;
+  background: transparent;
+  box-shadow: none;
+}
 .page-heading { align-items: flex-start; margin-bottom: 1.25rem; }
 .page-heading h1 { margin: 0; font-size: clamp(1.8rem, 3vw, 2.45rem); }
 .page-heading p { max-width: 52rem; margin: 0.5rem 0 0; color: var(--soft); line-height: 1.65; }
@@ -1796,7 +1821,6 @@ select { width: 100%; padding: 0 0.8rem; }
   .brand small { display: none; }
   .header-actions { gap: 0; }
   .workspace { padding: 0.75rem; }
-  .page-panel { padding: 1rem; }
   .review-recovery-search,
   .review-recovery-submit { grid-template-columns: 1fr; }
   .review-recovery-search button,

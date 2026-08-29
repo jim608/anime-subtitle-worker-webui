@@ -4083,6 +4083,160 @@ class WebuiBackendTests(unittest.TestCase):
         self.assertEqual(command["action"], "ai.retry")
         self.assertFalse((self.module.WORK_PATH / "scanner_state.sqlite3").exists())
 
+    def test_v2_ai_canary_once_enqueues_exact_target_and_parameters_idempotently(self) -> None:
+        anime_root = self.tmp / "anime"
+        target = anime_root / "Series" / "Season 1" / "Episode.mkv"
+        scanner_database = self.module.WORK_PATH / "scanner_state.sqlite3"
+        scanner_database.write_bytes(b"scanner-state-sentinel")
+        config = {
+            "input_path": str(anime_root),
+            "work_path": str(self.module.WORK_PATH),
+            "control_inbox_path": "control_inbox",
+            "control_state_path": "control_state.sqlite3",
+        }
+        client_parameters = {
+            "expected_failure_revision": "0123456789abcdef01234567",
+            "expected_failure_code": "transient_oom",
+            "expected_media_mtime_ns": 1_777_000_123_456_789_000,
+        }
+
+        class Request:
+            headers = {"idempotency-key": "target-bound-canary"}
+
+            async def json(self):
+                return {
+                    "action": "ai.canary_once",
+                    "target": str(target),
+                    "parameters": dict(client_parameters),
+                }
+
+        with patch.object(self.module, "_load_config", return_value=config):
+            first = asyncio.run(self.module.v2_create_command(Request()))
+            second = asyncio.run(self.module.v2_create_command(Request()))
+
+        self.assertEqual(first["command_id"], second["command_id"])
+        inbox_files = list((self.module.WORK_PATH / "control_inbox").glob("*.json"))
+        self.assertEqual(len(inbox_files), 1)
+        command = json.loads(inbox_files[0].read_text(encoding="utf-8"))
+        self.assertEqual(command["action"], "ai.canary_once")
+        self.assertEqual(command["target"], str(target.resolve(strict=False)))
+        self.assertEqual(
+            command["parameters"],
+            {
+                **client_parameters,
+                "campaign_key": "target-bound-canary",
+                "max_items": 1,
+                "max_in_flight": 1,
+                "max_consecutive_failures": 1,
+                "strategy_version": "canary-once-v1",
+            },
+        )
+        self.assertEqual(scanner_database.read_bytes(), b"scanner-state-sentinel")
+        self.assertIn("ai.canary_once", self.module.V2_COMMAND_ACTIONS)
+        self.assertNotIn("ai.canary_once", self.module.LEGACY_QUEUE_COMMAND_ACTIONS.values())
+        self.assertNotIn("ai.canary_once", self.module.LEGACY_BACKGROUND_COMMAND_ACTIONS.values())
+
+    def test_v2_ai_canary_once_rejects_missing_or_malformed_preconditions(self) -> None:
+        anime_root = self.tmp / "anime"
+        target = anime_root / "Series" / "Episode.mkv"
+        config = {
+            "input_path": str(anime_root),
+            "work_path": str(self.module.WORK_PATH),
+            "control_inbox_path": "control_inbox",
+            "control_state_path": "control_state.sqlite3",
+        }
+        valid = {
+            "expected_failure_revision": "0123456789abcdef01234567",
+            "expected_failure_code": "transient_timeout",
+            "expected_media_mtime_ns": 123,
+        }
+        cases = {
+            "missing-revision": {key: value for key, value in valid.items() if key != "expected_failure_revision"},
+            "missing-code": {key: value for key, value in valid.items() if key != "expected_failure_code"},
+            "missing-mtime": {key: value for key, value in valid.items() if key != "expected_media_mtime_ns"},
+            "stale-revision-shape": {**valid, "expected_failure_revision": "stale-revision"},
+            "uppercase-revision": {**valid, "expected_failure_revision": "ABCDEF0123456789ABCDEF01"},
+            "wrong-code": {**valid, "expected_failure_code": "permanent_failure"},
+            "uppercase-code": {**valid, "expected_failure_code": "TRANSIENT_TIMEOUT"},
+            "zero-mtime": {**valid, "expected_media_mtime_ns": 0},
+            "string-mtime": {**valid, "expected_media_mtime_ns": "123"},
+            "boolean-mtime": {**valid, "expected_media_mtime_ns": True},
+        }
+
+        for case_name, parameters in cases.items():
+            class Request:
+                headers = {"idempotency-key": f"invalid-canary-{case_name}"}
+
+                async def json(self):
+                    return {
+                        "action": "ai.canary_once",
+                        "target": str(target),
+                        "parameters": parameters,
+                    }
+
+            with self.subTest(case=case_name), patch.object(self.module, "_load_config", return_value=config):
+                with self.assertRaises(self.module.HTTPException) as rejected:
+                    asyncio.run(self.module.v2_create_command(Request()))
+                self.assertEqual(rejected.exception.status_code, 400)
+
+        class MissingTargetRequest:
+            headers = {"idempotency-key": "invalid-canary-missing-target"}
+
+            async def json(self):
+                return {
+                    "action": "ai.canary_once",
+                    "parameters": dict(valid),
+                }
+
+        with patch.object(self.module, "_load_config", return_value=config):
+            with self.assertRaises(self.module.HTTPException) as rejected:
+                asyncio.run(self.module.v2_create_command(MissingTargetRequest()))
+            self.assertEqual(rejected.exception.status_code, 400)
+
+        self.assertFalse((self.module.WORK_PATH / "control_inbox").exists())
+        self.assertFalse((self.module.WORK_PATH / "scanner_state.sqlite3").exists())
+
+    def test_v2_ai_canary_once_rejects_server_parameter_overrides(self) -> None:
+        anime_root = self.tmp / "anime"
+        target = anime_root / "Series" / "Episode.mkv"
+        config = {
+            "input_path": str(anime_root),
+            "work_path": str(self.module.WORK_PATH),
+            "control_inbox_path": "control_inbox",
+            "control_state_path": "control_state.sqlite3",
+        }
+        valid = {
+            "expected_failure_revision": "0123456789abcdef01234567",
+            "expected_failure_code": "translation_safe_omission",
+            "expected_media_mtime_ns": 456,
+        }
+        overrides = {
+            "max_items": 2,
+            "max_in_flight": 2,
+            "max_consecutive_failures": 2,
+            "strategy_version": "client-controlled",
+            "target_path": "/anime/Another/Episode.mkv",
+            "campaign_key": "client-controlled",
+        }
+
+        for field, value in overrides.items():
+            class Request:
+                headers = {"idempotency-key": f"unsafe-canary-{field}"}
+
+                async def json(self):
+                    return {
+                        "action": "ai.canary_once",
+                        "target": str(target),
+                        "parameters": {**valid, field: value},
+                    }
+
+            with self.subTest(field=field), patch.object(self.module, "_load_config", return_value=config):
+                with self.assertRaises(self.module.HTTPException) as rejected:
+                    asyncio.run(self.module.v2_create_command(Request()))
+                self.assertEqual(rejected.exception.status_code, 400)
+
+        self.assertFalse((self.module.WORK_PATH / "control_inbox").exists())
+
     def test_v2_cancel_extract_command_is_accepted_without_media_path_validation(self) -> None:
         config = {
             "input_path": "/anime",

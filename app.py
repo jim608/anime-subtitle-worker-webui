@@ -655,6 +655,7 @@ V2_COMMAND_ACTIONS = {
     "ai.retranslate",
     "ai.retranslate_lines",
     "ai.retranscribe",
+    "ai.canary_once",
     "system.ai_queue_pause",
     "system.ai_queue_resume",
     "system.retry_all_failures",
@@ -680,6 +681,26 @@ V2_COMMAND_ACTIONS = {
     "review.resolve_ai",
     "review.resolve_target",
 }
+
+AI_CANARY_ONCE_CLIENT_PARAMETERS = frozenset({
+    "expected_failure_revision",
+    "expected_failure_code",
+    "expected_media_mtime_ns",
+})
+AI_CANARY_ONCE_SERVER_PARAMETERS = frozenset({
+    "campaign_key",
+    "max_items",
+    "max_in_flight",
+    "max_consecutive_failures",
+    "strategy_version",
+    "target_path",
+})
+AI_CANARY_ONCE_FAILURE_CODES = frozenset({
+    "transient_oom",
+    "transient_timeout",
+    "transient_connection",
+    "translation_safe_omission",
+})
 
 LEGACY_QUEUE_COMMAND_ACTIONS = {
     "priority": "ai.prioritize",
@@ -994,6 +1015,54 @@ async def v2_create_command(request: Request) -> dict[str, Any]:
         parameters = {}
     else:
         parameters = dict(parameters)
+    if action == "ai.canary_once":
+        reserved = sorted(set(parameters) & AI_CANARY_ONCE_SERVER_PARAMETERS)
+        if reserved:
+            raise HTTPException(
+                status_code=400,
+                detail=f"AI canary server parameters cannot be overridden: {', '.join(reserved)}",
+            )
+        unexpected = sorted(set(parameters) - AI_CANARY_ONCE_CLIENT_PARAMETERS)
+        if unexpected:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Unsupported AI canary parameters: {', '.join(unexpected)}",
+            )
+        expected_failure_revision = parameters.get("expected_failure_revision")
+        if (
+            not isinstance(expected_failure_revision, str)
+            or re.fullmatch(r"[0-9a-f]{24}", expected_failure_revision) is None
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail="AI canary expected_failure_revision must be 24 lowercase hexadecimal characters",
+            )
+        expected_failure_code = parameters.get("expected_failure_code")
+        if (
+            not isinstance(expected_failure_code, str)
+            or expected_failure_code not in AI_CANARY_ONCE_FAILURE_CODES
+        ):
+            raise HTTPException(status_code=400, detail="Invalid AI canary expected_failure_code")
+        expected_media_mtime_ns = parameters.get("expected_media_mtime_ns")
+        if (
+            isinstance(expected_media_mtime_ns, bool)
+            or not isinstance(expected_media_mtime_ns, int)
+            or expected_media_mtime_ns <= 0
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail="AI canary expected_media_mtime_ns must be a positive integer",
+            )
+        parameters = {
+            "expected_failure_revision": expected_failure_revision,
+            "expected_failure_code": expected_failure_code,
+            "expected_media_mtime_ns": expected_media_mtime_ns,
+            "campaign_key": idempotency_key,
+            "max_items": 1,
+            "max_in_flight": 1,
+            "max_consecutive_failures": 1,
+            "strategy_version": "canary-once-v1",
+        }
     if action == "system.ai_failed_retry_sweep":
         operation = str(parameters.get("operation") or "preview").strip().casefold()
         if operation not in {"preview", "start", "pause", "resume", "cancel"}:
