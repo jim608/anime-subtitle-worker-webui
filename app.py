@@ -45,6 +45,7 @@ from control_api import (
     read_command,
     read_review,
     review_active_queue_targets,
+    review_autopilot_revision_attempts_allowed,
     review_command_states,
     review_queue_states,
     review_state_counts,
@@ -106,6 +107,10 @@ _OPEN_REVIEW_COUNT_CACHE: dict[str, Any] = {}
 _DISK_SUMMARY_CACHE: dict[str, Any] = {}
 _REVIEW_AUTOMATION_COUNTS_CACHE: dict[tuple[str, int, str], dict[str, Any]] = {}
 _REVIEW_AUTOMATION_COUNTS_CACHE_LOCK = threading.Lock()
+_AI_QUALITY_REVIEW_AUTOPILOT_PREFIX = (
+    "review-autopilot:asr-full-retranscribe-v1:review.resolve_ai:"
+)
+_AI_QUALITY_REVIEW_AUTOPILOT_MAX_ATTEMPTS = 3
 _RESOURCE_TELEMETRY_CACHE: dict[str, Any] = {
     "expires_at": 0.0,
     "refreshing": False,
@@ -1707,7 +1712,7 @@ def _review_automation_counts_uncached(
         if not items:
             break
         prepared = _prepare_review_items_with_action_state(items, config=config)
-        automatic_safe += sum(bool(item.get("batch_eligible")) for item in prepared)
+        automatic_safe += len(_review_automatable_quality_review_ids(prepared, config=config))
         offset += len(items)
         if offset >= int(total or 0):
             break
@@ -1719,6 +1724,53 @@ def _review_automation_counts_uncached(
         "automatic_safe": automatic_safe,
         "human_required": max(0, needs_action_count - automatic_safe),
     }
+
+
+def _review_automatable_quality_review_ids(
+    items: list[dict[str, Any]],
+    *,
+    config: dict[str, Any],
+) -> set[str]:
+    """Return only reviews provably eligible for the Worker's next autopilot attempt."""
+
+    if config.get("auto_ai_quality_review_autopilot_enabled") is not True:
+        return set()
+    candidates = [
+        item
+        for item in items
+        if bool(item.get("batch_eligible"))
+        and str(item.get("kind") or "") == "asr_quality"
+        and str((item.get("recommended_action") or {}).get("action") or "") == "ai.retranscribe"
+    ]
+    targets = {
+        str(item.get("review_id") or ""): str(
+            (item.get("diagnosis") or {}).get("video") or item.get("target_key") or ""
+        ).strip()
+        for item in candidates
+    }
+    queue_states = review_queue_states(
+        WORK_PATH / "scanner_state.sqlite3",
+        [target for target in targets.values() if target],
+    )
+    failure_revisions: dict[str, str] = {}
+    for review_id, target in targets.items():
+        snapshot = queue_states.get(target) or {}
+        failure_revision = str(snapshot.get("failure_revision") or "").strip()
+        if (
+            review_id
+            and target
+            and str(snapshot.get("status") or "").strip().casefold() == "paused"
+            and str(snapshot.get("last_error_code") or "").strip().casefold()
+            == "deterministic_asr_quality"
+            and failure_revision
+        ):
+            failure_revisions[review_id] = failure_revision
+    return review_autopilot_revision_attempts_allowed(
+        _control_state_db_path(config),
+        idempotency_prefix=_AI_QUALITY_REVIEW_AUTOPILOT_PREFIX,
+        failure_revisions=failure_revisions,
+        max_attempts=_AI_QUALITY_REVIEW_AUTOPILOT_MAX_ATTEMPTS,
+    )
 
 
 def _review_state_counts(

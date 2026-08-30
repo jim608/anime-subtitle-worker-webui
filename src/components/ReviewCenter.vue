@@ -10,6 +10,7 @@ import {
   qualityIssueLabel,
   reviewOperationIsActive,
   reviewOperationLabel,
+  reviewOperationNeedsFocus,
 } from "../dashboard.js";
 
 const props = defineProps({
@@ -1224,7 +1225,7 @@ onUnmounted(() => {
           </details>
 
           <section
-            v-if="reviewOperation(selectedItem)"
+            v-if="reviewOperation(selectedItem) && reviewOperationNeedsFocus(operationStatus(selectedItem))"
             :class="['review-operation-status', operationTone(selectedItem)]"
             data-testid="review-operation-status"
             role="status"
@@ -1246,6 +1247,27 @@ onUnmounted(() => {
               <button type="button" @click="continueAfterOperation">返回待辦清單</button>
             </div>
           </section>
+
+          <details
+            v-else-if="reviewOperation(selectedItem)"
+            class="review-operation-history"
+            data-testid="review-operation-history"
+          >
+            <summary>
+              <span class="review-operation-mark" aria-hidden="true">✓</span>
+              <strong>{{ operationTitle(selectedItem) }}</strong>
+              <small>查看處理結果</small>
+            </summary>
+            <div class="review-operation-history-body">
+              <p>{{ operationDescription(selectedItem) }}</p>
+              <div v-if="operationCanReturnToInbox(selectedItem)" class="review-operation-actions">
+                <button v-if="operationMode(selectedItem) !== 'dismiss'" type="button" class="primary-review-action" @click="openRelatedWork(selectedItem)">
+                  {{ selectedItem.kind === 'target_ambiguity' ? '查看字幕提取狀態' : '查看 AI 處理進度' }}
+                </button>
+                <button type="button" @click="continueAfterOperation">返回待辦清單</button>
+              </div>
+            </div>
+          </details>
 
           <template v-if="selectedItem.kind === 'target_ambiguity'">
             <section class="review-detail-section">

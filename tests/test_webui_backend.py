@@ -5983,6 +5983,7 @@ class WebuiBackendTests(unittest.TestCase):
         diagnosis: dict | None = None,
         candidates: list[dict] | None = None,
         status: str = "open",
+        kind: str = "subtitle_quality",
     ) -> None:
         database = self.module.WORK_PATH / "control_state.sqlite3"
         payload = {"video": str(video), "reports": []}
@@ -6011,9 +6012,9 @@ class WebuiBackendTests(unittest.TestCase):
                 INSERT INTO review_items(
                     review_id, kind, target_key, severity, summary,
                     diagnosis_json, candidates_json, status, created_at, updated_at
-                ) VALUES (?, 'subtitle_quality', ?, 'error', 'Translation quality failed', ?, ?, ?, 1, 1)
+                ) VALUES (?, ?, ?, 'error', 'Translation quality failed', ?, ?, ?, 1, 1)
                 """,
-                (review_id, str(video), json.dumps(payload), json.dumps(candidates or []), status),
+                (review_id, kind, str(video), json.dumps(payload), json.dumps(candidates or []), status),
             )
 
     def test_v2_review_summary_is_compact_and_detail_deduplicates_quality_issues(self) -> None:
@@ -6417,7 +6418,7 @@ class WebuiBackendTests(unittest.TestCase):
         self.assertEqual(command["parameters"]["remediation"], "ai.retranslate_lines")
         self.assertEqual(command["parameters"]["lines"], "3")
 
-    def test_v2_review_state_counts_partition_needs_action_by_batch_eligibility(self) -> None:
+    def test_v2_review_state_counts_fail_closed_without_autopilot_evidence(self) -> None:
         anime_root = self.tmp / "anime"
         video = anime_root / "Series" / "Episode.mkv"
         video.parent.mkdir(parents=True)
@@ -6442,12 +6443,112 @@ class WebuiBackendTests(unittest.TestCase):
         self.assertEqual(counts["needs_action"], 2)
         self.assertEqual(counts["processing"], 0)
         self.assertEqual(counts["resolved"], 0)
-        self.assertEqual(counts["automatic_safe"], 1)
-        self.assertEqual(counts["human_required"], 1)
+        self.assertEqual(counts["automatic_safe"], 0)
+        self.assertEqual(counts["human_required"], 2)
         self.assertEqual(
             counts["automatic_safe"] + counts["human_required"],
             counts["needs_action"],
         )
+
+    def test_review_automation_counts_move_exhausted_revision_budget_to_human(self) -> None:
+        anime_root = self.tmp / "anime"
+        video = anime_root / "One Piece" / "Season 18" / "One Piece - S18E08.mkv"
+        video.parent.mkdir(parents=True)
+        video.write_bytes(b"")
+        review_id = "review_" + "a" * 24
+        current_revision = "f" * 24
+        self._write_quality_review(
+            review_id=review_id,
+            video=video,
+            kind="asr_quality",
+            diagnosis={"reports": [{"issues": [{"code": "asr_low_confidence"}]}]},
+            candidates=[{"action": "ai.retranscribe"}],
+        )
+        scanner_database = self.module.WORK_PATH / "scanner_state.sqlite3"
+        with sqlite3.connect(scanner_database) as connection:
+            connection.execute(
+                """
+                CREATE TABLE ai_candidate_queue(
+                    path TEXT PRIMARY KEY,
+                    status TEXT NOT NULL,
+                    failure_revision TEXT NOT NULL,
+                    last_error_code TEXT NOT NULL,
+                    attempts INTEGER NOT NULL
+                )
+                """
+            )
+            connection.execute(
+                "INSERT INTO ai_candidate_queue VALUES (?, 'paused', ?, 'deterministic_asr_quality', 3)",
+                (str(video), current_revision),
+            )
+        database = self.module.WORK_PATH / "control_state.sqlite3"
+        prefix = self.module._AI_QUALITY_REVIEW_AUTOPILOT_PREFIX
+        with sqlite3.connect(database) as connection:
+            connection.execute(
+                """
+                CREATE TABLE control_commands(
+                    command_id TEXT PRIMARY KEY,
+                    idempotency_key TEXT NOT NULL,
+                    action TEXT NOT NULL,
+                    review_id TEXT NOT NULL,
+                    target TEXT NOT NULL,
+                    parameters_json TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    result_json TEXT NOT NULL,
+                    error TEXT NOT NULL,
+                    requested_at REAL NOT NULL,
+                    started_at REAL NOT NULL,
+                    finished_at REAL NOT NULL
+                )
+                """
+            )
+            for attempt in range(2):
+                revision = f"{attempt + 1:024x}"
+                connection.execute(
+                    "INSERT INTO control_commands VALUES (?, ?, 'review.resolve_ai', ?, ?, ?, 'completed', '{}', '', ?, ?, ?)",
+                    (
+                        f"cmd_{attempt + 1:024x}",
+                        f"{prefix}{review_id}:{revision}",
+                        review_id,
+                        str(video),
+                        json.dumps({"expected_failure_revision": revision}),
+                        attempt + 1,
+                        attempt + 1,
+                        attempt + 1,
+                    ),
+                )
+        config = {
+            "input_path": str(anime_root),
+            "work_path": str(self.module.WORK_PATH),
+            "auto_ai_quality_review_autopilot_enabled": True,
+        }
+
+        remaining = self.module._review_automation_counts_uncached(
+            config,
+            active_queue_targets=set(),
+            needs_action_count=1,
+        )
+        self.assertEqual(remaining, {"automatic_safe": 1, "human_required": 0})
+
+        with sqlite3.connect(database) as connection:
+            revision = f"{3:024x}"
+            connection.execute(
+                "INSERT INTO control_commands VALUES (?, ?, 'review.resolve_ai', ?, ?, ?, 'completed', '{}', '', 3, 3, 3)",
+                (
+                    f"cmd_{3:024x}",
+                    f"{prefix}{review_id}:{revision}",
+                    review_id,
+                    str(video),
+                    json.dumps({"expected_failure_revision": revision}),
+                ),
+            )
+
+        exhausted = self.module._review_automation_counts_uncached(
+            config,
+            active_queue_targets=set(),
+            needs_action_count=1,
+        )
+        self.assertEqual(exhausted, {"automatic_safe": 0, "human_required": 1})
 
     def test_review_automation_counts_cache_reuses_same_key_and_recomputes_changed_state(self) -> None:
         config = {"work_path": str(self.module.WORK_PATH)}

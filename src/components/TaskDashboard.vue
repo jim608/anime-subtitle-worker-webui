@@ -14,6 +14,8 @@ import {
   subtitleQualityLabel,
   subtitleQualitySummary,
   subtitleQualityTone,
+  taskSummaryNeedsFocus,
+  taskSummaryTone,
   taskProgress,
 } from "../dashboard.js";
 
@@ -283,7 +285,11 @@ function qualityIssueLineSpec(issue) {
             <small v-if="elapsed(task)">已跑 {{ elapsed(task) }}</small>
           </div>
           <h3>{{ task.file_name || fileName(task.path) }}</h3>
-          <p v-if="task.message || task.skip_reason || task.problem" class="task-summary" :class="{ 'warning-text': task.status === 'Failed' }">
+          <p
+            v-if="(task.message || task.skip_reason || task.problem) && taskSummaryNeedsFocus(task)"
+            class="task-summary"
+            :class="{ 'warning-text': ['danger', 'warn'].includes(taskSummaryTone(task)) }"
+          >
             {{ friendlyTaskMessage(task) }}
           </p>
           <p v-if="task.problem?.requires_user_action && task.status !== 'Failed'" class="recommended-action">

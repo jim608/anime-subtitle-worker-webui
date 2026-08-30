@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import sqlite3
 import tempfile
 import time
@@ -479,6 +480,107 @@ def review_command_states(
     return states
 
 
+def review_autopilot_revision_attempts_allowed(
+    database: Path,
+    *,
+    idempotency_prefix: str,
+    failure_revisions: dict[str, str],
+    max_attempts: int,
+) -> set[str]:
+    """Return reviews with budget for one new revision-scoped autopilot attempt.
+
+    This is the read-only, batched WebUI equivalent of the Worker's
+    ``review_autopilot_revision_attempt_allowed`` contract. Missing schema or
+    unreadable state returns no eligible reviews so summary counts fail closed.
+    """
+
+    normalized_prefix = str(idempotency_prefix or "").strip()
+    bounded_max_attempts = int(max_attempts)
+    if not normalized_prefix or len(normalized_prefix) > 180:
+        raise ValueError("review autopilot idempotency prefix is invalid")
+    if bounded_max_attempts < 1 or bounded_max_attempts > 20:
+        raise ValueError("review autopilot max attempts is invalid")
+    revisions = {
+        str(review_id).strip(): str(revision).strip()
+        for review_id, revision in failure_revisions.items()
+        if re.fullmatch(r"review_[0-9a-f]{24}", str(review_id).strip())
+        and 0 < len(str(revision).strip()) <= 200
+    }
+    if not revisions or not database.exists():
+        return set()
+
+    rows_by_review: dict[str, list[sqlite3.Row]] = {review_id: [] for review_id in revisions}
+    connection: sqlite3.Connection | None = None
+    try:
+        connection = sqlite3.connect(f"file:{database}?mode=ro", uri=True, timeout=10)
+        connection.row_factory = sqlite3.Row
+        connection.execute("PRAGMA busy_timeout=10000")
+        columns = {
+            str(row[1])
+            for row in connection.execute("PRAGMA table_info(control_commands)").fetchall()
+        }
+        required = {"review_id", "idempotency_key", "parameters_json", "status"}
+        if not required.issubset(columns):
+            return set()
+        ordered = sorted(revisions)
+        for start in range(0, len(ordered), 500):
+            chunk = ordered[start : start + 500]
+            placeholders = ",".join("?" for _review_id in chunk)
+            rows = connection.execute(
+                "SELECT review_id, idempotency_key, parameters_json, status "
+                f"FROM control_commands WHERE review_id IN ({placeholders})",
+                chunk,
+            ).fetchall()
+            for row in rows:
+                review_id = str(row["review_id"] or "")
+                if review_id in rows_by_review:
+                    rows_by_review[review_id].append(row)
+    except sqlite3.Error:
+        return set()
+    finally:
+        if connection is not None:
+            connection.close()
+
+    allowed: set[str] = set()
+    for review_id, failure_revision in revisions.items():
+        rows = rows_by_review.get(review_id, [])
+        if any(str(row["status"] or "").casefold() in {"queued", "running"} for row in rows):
+            continue
+        legacy_key = f"{normalized_prefix}{review_id}"
+        scoped_key = f"{legacy_key}:{failure_revision}"
+        scoped_prefix = f"{legacy_key}:"
+        policy_rows = [
+            row
+            for row in rows
+            if str(row["idempotency_key"] or "") == legacy_key
+            or str(row["idempotency_key"] or "").startswith(scoped_prefix)
+        ]
+        if len(policy_rows) >= bounded_max_attempts:
+            continue
+        revision_consumed = False
+        for row in policy_rows:
+            key = str(row["idempotency_key"] or "")
+            if key == scoped_key:
+                revision_consumed = True
+                break
+            try:
+                parameters = json.loads(str(row["parameters_json"] or "{}"))
+            except (TypeError, ValueError, json.JSONDecodeError):
+                parameters = None
+            if not isinstance(parameters, dict):
+                if key == legacy_key:
+                    revision_consumed = True
+                    break
+                continue
+            recorded_revision = str(parameters.get("expected_failure_revision") or "").strip()
+            if recorded_revision == failure_revision or (key == legacy_key and not recorded_revision):
+                revision_consumed = True
+                break
+        if not revision_consumed:
+            allowed.add(review_id)
+    return allowed
+
+
 def review_queue_states(database: Path, targets: list[str]) -> dict[str, dict[str, Any]]:
     """Read current AI queue state for review command targets without writes."""
 
@@ -496,15 +598,20 @@ def review_queue_states(database: Path, targets: list[str]) -> dict[str, dict[st
         }
         if not {"path", "status"}.issubset(columns):
             return {}
-        last_error = "last_error" if "last_error" in columns else "'' AS last_error"
-        updated_at = "updated_at" if "updated_at" in columns else "0 AS updated_at"
+        optional_fields = [
+            "last_error" if "last_error" in columns else "'' AS last_error",
+            "updated_at" if "updated_at" in columns else "0 AS updated_at",
+            "failure_revision" if "failure_revision" in columns else "'' AS failure_revision",
+            "last_error_code" if "last_error_code" in columns else "'' AS last_error_code",
+            "attempts" if "attempts" in columns else "0 AS attempts",
+        ]
         states: dict[str, dict[str, Any]] = {}
         ordered = sorted(wanted)
         for start in range(0, len(ordered), 500):
             chunk = ordered[start : start + 500]
             placeholders = ",".join("?" for _target in chunk)
             rows = connection.execute(
-                f"SELECT path, status, {last_error}, {updated_at} "
+                f"SELECT path, status, {', '.join(optional_fields)} "
                 f"FROM ai_candidate_queue WHERE path IN ({placeholders})",
                 chunk,
             ).fetchall()

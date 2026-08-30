@@ -36,11 +36,14 @@ import {
   qualityIssueLabel,
   reviewOperationIsActive,
   reviewOperationLabel,
+  reviewOperationNeedsFocus,
   statusTone,
   repairDisplayText,
   subtitleQualityLabel,
   subtitleQualitySummary,
   subtitleQualityTone,
+  taskSummaryNeedsFocus,
+  taskSummaryTone,
   taskProgress,
 } from "../src/dashboard.js";
 
@@ -106,6 +109,19 @@ assert.equal(reviewOperationLabel("failed"), "處理失敗");
 assert.equal(reviewOperationIsActive("running"), true);
 assert.equal(reviewOperationIsActive("unknown"), true);
 assert.equal(reviewOperationIsActive("completed"), false);
+assert.equal(reviewOperationNeedsFocus("running"), true);
+assert.equal(reviewOperationNeedsFocus("unknown"), true);
+assert.equal(reviewOperationNeedsFocus("failed"), true);
+assert.equal(reviewOperationNeedsFocus("completed"), false);
+assert.equal(taskSummaryNeedsFocus({ status: "Running", message: "Translating batch 1/2" }), true);
+assert.equal(taskSummaryNeedsFocus({ raw_status: "failed_retry", message: "retry later" }), true);
+assert.equal(taskSummaryNeedsFocus({ status: "Queued", message: "queued" }), false);
+assert.equal(taskSummaryNeedsFocus({ status: "Success", message: "done" }), false);
+assert.equal(taskSummaryNeedsFocus({ status: "Queued", problem: { severity: "warning", description: "需要檢查" } }), true);
+assert.equal(taskSummaryNeedsFocus({ status: "Queued", problem: { severity: "info", description: "等待處理" } }), false);
+assert.equal(taskSummaryNeedsFocus({ status: "Success", problem: { severity: "success", description: "已完成" } }), false);
+assert.equal(taskSummaryTone({ raw_status: "done", effective_status: "failed_retry", status: "Failed" }), "danger");
+assert.equal(taskSummaryNeedsFocus({ raw_status: "done", effective_status: "failed_retry", status: "Failed" }), true);
 assert.equal(qualityIssueLabel("prompt_leak"), "翻譯混入模型指令");
 assert.equal(qualityIssueLabel("asr_prompt_echo"), "轉錄提示混入日文字幕");
 assert.equal(qualityIssueLabel("leading_gap"), "片頭開場可能漏轉");
@@ -394,6 +410,7 @@ assert.match(taskDashboard, /primaryActionFor/);
 assert.match(taskDashboard, /secondaryActionsFor/);
 assert.match(taskDashboard, /task-action-menu/);
 assert.match(taskDashboard, /task-failure-state/);
+assert.match(taskDashboard, /taskSummaryNeedsFocus\(task\)/);
 assert.match(taskDashboard, /viewMode === 'active' && task\.status !== 'Failed'/);
 assert.match(taskDashboard, /<summary>技術資料與操作<\/summary>/);
 assert.match(taskDashboard, /class="queue-utilities"/);
@@ -543,6 +560,8 @@ assert.match(reviewCenter, /target\.rebuild_candidates/);
 assert.match(reviewCenter, /建立安全候選/);
 assert.match(reviewCenter, /review-operation-status/);
 assert.match(reviewCenter, /data-testid="review-operation-status"/);
+assert.match(reviewCenter, /reviewOperationNeedsFocus\(operationStatus\(selectedItem\)\)/);
+assert.match(reviewCenter, /data-testid="review-operation-history"/);
 assert.match(reviewCenter, /aria-live="polite"/);
 assert.match(reviewCenter, /aria-label="搜尋例外項目"/);
 assert.match(reviewCenter, /不需要返回清單確認/);

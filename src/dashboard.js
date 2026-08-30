@@ -44,6 +44,11 @@ export function reviewOperationIsActive(status) {
     .includes(String(status || "").toLowerCase());
 }
 
+export function reviewOperationNeedsFocus(status) {
+  const value = String(status || "").toLowerCase();
+  return reviewOperationIsActive(value) || value === "failed";
+}
+
 export const mikanStatusLabels = {
   downloading: "下載中",
   queued: "等待下載",
@@ -136,6 +141,26 @@ export function taskProgress(task) {
   if (batch && Number(batch[2]) > 0) return Math.max(0, Math.min(100, Number(batch[1]) * 100 / Number(batch[2])));
   if (task?.status === "Running") return null;
   return 0;
+}
+
+export function taskSummaryTone(task) {
+  const tones = [task?.raw_status, task?.effective_status, task?.status]
+    .filter(Boolean)
+    .map(statusTone);
+  if (tones.includes("danger")) return "danger";
+  if (tones.includes("warn")) return "warn";
+  if (tones.includes("running")) return "running";
+  return tones[0] || "queued";
+}
+
+export function taskSummaryNeedsFocus(task) {
+  const qualityStatus = String(task?.subtitle_quality?.status || "").toLowerCase();
+  const problemSeverity = String(task?.problem?.severity || "").toLowerCase();
+  const problemNeedsFocus = Boolean(task?.problem?.requires_user_action)
+    || ["danger", "error", "warn", "warning"].includes(problemSeverity);
+  return ["danger", "warn", "running"].includes(taskSummaryTone(task))
+    || problemNeedsFocus
+    || Boolean(qualityStatus && qualityStatus !== "watchable");
 }
 
 export function formatPercent(value) {
