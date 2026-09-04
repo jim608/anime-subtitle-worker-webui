@@ -3585,6 +3585,8 @@ def _config_file_signature() -> tuple[str, int, int]:
 def _invalidate_config_cache() -> None:
     with _CONFIG_CACHE_LOCK:
         _CONFIG_CACHE.update({"signature": None, "value": None})
+    _SUBTITLE_QUALITY_CACHE.clear()
+    _AI_COMPLETION_TIME_CACHE.clear()
 
 
 def _save_config(config: dict[str, Any]) -> None:
@@ -4457,6 +4459,9 @@ def _subtitle_quality_for_video(path: str) -> dict[str, Any] | None:
         if payload is None:
             continue
         issues = payload.get("issues") if isinstance(payload.get("issues"), list) else []
+        report_subtitle_path = payload.get("path")
+        if not isinstance(report_subtitle_path, str) or not report_subtitle_path.strip():
+            report_subtitle_path = str(subtitle_path)
         result = {
             "status": str(payload.get("status") or ""),
             "score": _coerce_int(payload.get("score")),
@@ -4487,7 +4492,7 @@ def _subtitle_quality_for_video(path: str) -> dict[str, Any] | None:
                 if isinstance(issue, dict)
             ],
             "report_path": str(report_path),
-            "subtitle_path": str(subtitle_path),
+            "subtitle_path": report_subtitle_path,
             "updated_at": report_path.stat().st_mtime,
         }
         _ttl_cache_set(_SUBTITLE_QUALITY_CACHE, path, {"quality": result})

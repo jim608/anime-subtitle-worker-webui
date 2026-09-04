@@ -1051,6 +1051,40 @@ class WebuiBackendTests(unittest.TestCase):
         self.assertEqual(quality["issues"][0]["indexes"], [9, 12])
         self.assertEqual(quality["issues"][0]["samples"], ["#9 原文 → ……", "#12 原文 → ……"])
 
+    def test_managed_subtitle_quality_report_preserves_authoritative_payload_path(self) -> None:
+        video = self.tmp / "anime" / "Series" / "Episode 01.mkv"
+        video.parent.mkdir(parents=True)
+        video.write_text("", encoding="utf-8")
+        candidate = video.with_name(video.stem + ".AI繁雙語.zh-TW.ass")
+        authoritative = video.with_name(video.stem + ".AI繁日雙語.zh-TW.ass")
+        report_path = self.module._managed_subtitle_quality_report_path(candidate)
+        report_path.parent.mkdir(parents=True, exist_ok=True)
+        report_path.write_text(
+            json.dumps(
+                {
+                    "path": str(authoritative),
+                    "status": "watchable",
+                    "score": 100,
+                    "dialogues": 1,
+                    "has_failures": False,
+                    "has_warnings": False,
+                    "issues": [],
+                }
+            ),
+            encoding="utf-8",
+        )
+        self.module.CONFIG_PATH.write_text(
+            yaml.safe_dump({"ai_traditional_chinese_ass_suffix": ".AI繁雙語.zh-TW.ass"}, allow_unicode=True),
+            encoding="utf-8",
+        )
+
+        quality = self.module._subtitle_quality_for_video(str(video))
+
+        self.assertIsNotNone(quality)
+        assert quality is not None
+        self.assertEqual(quality["report_path"], str(report_path))
+        self.assertEqual(quality["subtitle_path"], str(authoritative))
+
     def test_lite_status_uses_fast_queue_and_pending_snapshots(self) -> None:
         with sqlite3.connect(self.module.WORK_PATH / "scanner_state.sqlite3") as conn:
             conn.execute("CREATE TABLE ai_candidate_queue(path TEXT PRIMARY KEY, status TEXT NOT NULL)")
@@ -2611,6 +2645,8 @@ class WebuiBackendTests(unittest.TestCase):
         self.assertNotIn("time", first)
 
     def test_save_config_writes_yaml(self) -> None:
+        self.module._SUBTITLE_QUALITY_CACHE["cached"] = {"value": "stale"}
+        self.module._AI_COMPLETION_TIME_CACHE["cached"] = {"value": "stale"}
         self.module._save_config(
             {
                 "ass_primary_font_size": 58,
@@ -2622,6 +2658,8 @@ class WebuiBackendTests(unittest.TestCase):
         self.assertEqual(saved["ass_primary_font_size"], 58)
         self.assertTrue(saved["mikan_enabled"])
         self.assertEqual(saved["translator_model"], "hf.co/SakuraLLM/Sakura-7B-Qwen2.5-v1.0-GGUF:latest")
+        self.assertEqual(self.module._SUBTITLE_QUALITY_CACHE, {})
+        self.assertEqual(self.module._AI_COMPLETION_TIME_CACHE, {})
 
     def test_translator_model_is_editable_string(self) -> None:
         self.assertEqual(
