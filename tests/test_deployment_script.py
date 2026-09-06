@@ -1,10 +1,65 @@
 from pathlib import Path
+import contextlib
+import io
+import json
 import shutil
 import subprocess
 import unittest
+from unittest.mock import patch
 
 
 class DeploymentScriptContractTests(unittest.TestCase):
+    def test_authorized_post_retire_failure_does_not_rollback_database_or_image(self) -> None:
+        shell = shutil.which("sh")
+        if shell is None:
+            self.skipTest("POSIX sh is unavailable")
+        script = Path("safe-update-stack.sh").read_text(encoding="utf-8")
+        rollback = script[script.index("rollback() {"):script.index("trap rollback 0 1 2 15")]
+        harness = """
+RECONCILIATION_HOLD_VERIFIED=1
+RECONCILIATION_HOLD_ID=authorized-test
+DEPLOYMENT_COMPLETE=0
+MAINTENANCE_STARTED=1
+CONTAINERS_RETIRED=1
+WORKER_FROZEN=0
+WORKER_CONTAINER=isolated-worker
+WORKER_IMAGE=isolated-image
+WORK_DIR=/isolated-work-not-mounted
+DEPLOYMENT_ID=isolated-test
+docker() { echo "docker:$*"; }
+release_update_lock() { echo owned_lock_released; }
+remove_container_for_recreate() { echo FORBIDDEN_CONTAINER_ROLLBACK; }
+restore_ai_control() { echo FORBIDDEN_CONTROL_RESTORE; }
+cp() { echo FORBIDDEN_COPY; }
+mv() { echo FORBIDDEN_MOVE; }
+rm() { echo FORBIDDEN_DELETE; }
+""" + rollback + "\n(exit 7)\nrollback\n"
+        result = subprocess.run([shell, "-c", harness], capture_output=True, text=True)
+        self.assertEqual(7, result.returncode, result.stderr)
+        self.assertIn("No database rollback", result.stderr)
+        self.assertIn("pause-reconciliation", result.stdout)
+        self.assertIn("owned_lock_released", result.stdout)
+        self.assertNotIn("FORBIDDEN", result.stdout + result.stderr)
+        self.assertNotIn("image tag", result.stdout)
+
+    def test_scheduler_closeout_accepts_only_verified_reconciliation_hold(self) -> None:
+        script = Path("safe-update-stack.sh").read_text(encoding="utf-8")
+        section = script.split('echo "  Verifying AI scheduler recovery after deployment hold release."', 1)[1]
+        body = section.split("<<'PY'\n", 1)[1].split("\nPY", 1)[0]
+        status = {"worker": {"running": True, "restarting": False},
+                  "ai_scheduler": {"exists": True, "stale": False, "problem": False, "state": "deployment_hold"}}
+        for verified in ("0", "1"):
+            with self.subTest(verified=verified), \
+                 patch("sys.argv", ["-", "1", verified]), \
+                 patch("urllib.request.urlopen", side_effect=lambda *args, **kwargs: io.StringIO(json.dumps(status))), \
+                 patch("time.monotonic", side_effect=[0, 0, 2]), \
+                 patch("time.sleep"), contextlib.redirect_stdout(io.StringIO()):
+                if verified == "1":
+                    exec(compile(body, "scheduler-closeout", "exec"), {})
+                else:
+                    with self.assertRaisesRegex(SystemExit, "AI scheduler did not recover"):
+                        exec(compile(body, "scheduler-closeout", "exec"), {})
+
     def test_stack_update_is_valid_for_posix_sh(self) -> None:
         shell = shutil.which("sh")
         if shell is None:

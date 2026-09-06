@@ -28,6 +28,10 @@ SCANNER_STATE_RESTORE_DEPLOYMENT_ID="${SCANNER_STATE_RESTORE_DEPLOYMENT_ID:-}"
 RUN_TESTS="${RUN_TESTS:-1}"
 UPDATE_LOCK_DIR="${UPDATE_LOCK_DIR:-$WORK_DIR/deployment_update.lock}"
 AUTO_RECOVER_ORPHANED_PREBACKUP="${AUTO_RECOVER_ORPHANED_PREBACKUP:-1}"
+# Explicit owned maintenance mode: failures preserve current databases and
+# admission hold for controlled reconciliation, never restore a historical DB.
+RECONCILIATION_HOLD_ID="${RECONCILIATION_HOLD_ID:-}"
+RECONCILIATION_HOLD_VERIFIED=0
 
 case "$IDLE_WAIT_SECONDS:$IDLE_STABLE_SECONDS:$POLL_SECONDS:$STATUS_REPORT_SECONDS:$COMMAND_PROBE_TIMEOUT_SECONDS:$BACKUP_RETENTION_NEWEST:$BACKUP_RETENTION_DAILY:$BACKUP_RETENTION_WEEKLY" in
   *[!0-9:]*|*::*|:*|*:)
@@ -45,6 +49,9 @@ case "$AUTO_RECOVER_ORPHANED_PREBACKUP" in
     echo "AUTO_RECOVER_ORPHANED_PREBACKUP must be 0 or 1." >&2
     exit 2
     ;;
+esac
+case "$RECONCILIATION_HOLD_ID" in
+  *[!A-Za-z0-9_-]*) echo "Invalid reconciliation hold id." >&2; exit 2 ;;
 esac
 
 for command_name in docker curl sha256sum cp mv sed sh; do
@@ -130,6 +137,27 @@ CONTAINERS_RETIRED=0
 DEPLOYMENT_COMPLETE=0
 WORKER_FROZEN=0
 
+verify_reconciliation_hold() {
+  docker exec -i "$WORKER_CONTAINER" python - "$RECONCILIATION_HOLD_ID" <<'PY'
+import json
+from pathlib import Path
+import sys
+sys.path.insert(0, '/app')
+from config import load_config
+config = load_config('/app/config.yaml')
+control = json.loads((Path(config.work_path) / 'ai_control.json').read_text())
+if not (control.get('paused') is True and control.get('reconciliation_hold') is True
+        and control.get('reconciliation_id') == sys.argv[1] and sys.argv[1]):
+    raise SystemExit('Owned reconciliation admission hold is not active')
+print(json.dumps({'reconciliation_hold_verified': True, 'reconciliation_id': sys.argv[1]}))
+PY
+}
+
+if [ -n "$RECONCILIATION_HOLD_ID" ]; then
+  verify_reconciliation_hold
+  RECONCILIATION_HOLD_VERIFIED=1
+fi
+
 restore_ai_control() {
   if [ -f "$BACKUP_DIR/ai_control.json" ]; then
     cp "$BACKUP_DIR/ai_control.json" "$AI_CONTROL_FILE.rollback.tmp"
@@ -189,6 +217,23 @@ rollback() {
     restore_ai_control
     rm -f "$HOLD_FILE"
     release_update_lock
+    exit "$exit_code"
+  fi
+  if [ "$RECONCILIATION_HOLD_VERIFIED" = "1" ]; then
+    echo "Deployment failed during authorized reconciliation; preserving current images, databases, checkpoints and evidence. No database rollback." >&2
+    # Admission was durably held before maintenance. Reassert through the
+    # existing controlled entry when the new container is executable; never
+    # delete a latch or replace the database to manufacture recovery.
+    docker exec "$WORKER_CONTAINER" python /app/m2_guardrail_runtime.py \
+      pause-reconciliation --config /app/config.yaml \
+      --reconciliation-id "$RECONCILIATION_HOLD_ID" || \
+      echo "Reconciliation pause could not be rechecked; retain maintenance protections and inspect the failed container." >&2
+    docker run --rm -v "$WORK_DIR:/work" --entrypoint python "$WORKER_IMAGE" \
+      /app/deployment_backup_retention.py mark \
+      --backup "/work/deployment_backups/$DEPLOYMENT_ID" \
+      --state deployment_failed --verified-by authorized-reconciliation-preserve >/dev/null 2>&1 || true
+    release_update_lock
+    if [ "$exit_code" = "0" ]; then exit_code=1; fi
     exit "$exit_code"
   fi
   echo "Deployment failed; rolling back images and verified state backup." >&2
@@ -1047,13 +1092,17 @@ print(json.dumps({
 PY
 
 echo "  Verifying AI scheduler recovery after deployment hold release."
-docker exec -i "$WEBUI_CONTAINER" python - "$COMMAND_PROBE_TIMEOUT_SECONDS" <<'PY'
+if [ "$RECONCILIATION_HOLD_VERIFIED" = "1" ]; then
+  verify_reconciliation_hold
+fi
+docker exec -i "$WEBUI_CONTAINER" python - "$COMMAND_PROBE_TIMEOUT_SECONDS" "$RECONCILIATION_HOLD_VERIFIED" <<'PY'
 import json
 import sys
 import time
 from urllib.request import urlopen
 
 timeout_seconds = max(1, int(sys.argv[1]))
+owned_reconciliation_hold = len(sys.argv) > 2 and sys.argv[2] == "1"
 deadline = time.monotonic() + timeout_seconds
 base = "http://127.0.0.1:8765"
 last_status = {}
@@ -1078,13 +1127,15 @@ while time.monotonic() < deadline:
         and scheduler.get("exists")
         and not scheduler.get("stale")
         and not scheduler.get("problem")
-        and state not in {"starting", "deployment_hold", "unknown", "unavailable"}
+        and (state not in {"starting", "deployment_hold", "unknown", "unavailable"}
+             or (owned_reconciliation_hold and state == "deployment_hold"))
     ):
         print(json.dumps({
             "worker_status": worker.get("status"),
             "ai_scheduler_state": state,
             "ai_scheduler_heartbeat_age_seconds": scheduler.get("heartbeat_age_seconds"),
             "current_ai_stage": (last_status.get("current_ai") or {}).get("stage"),
+            "reconciliation_admission_held": owned_reconciliation_hold,
         }, indent=2))
         break
     time.sleep(1)
