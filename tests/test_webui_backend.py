@@ -896,6 +896,31 @@ class WebuiBackendTests(unittest.TestCase):
         self.assertTrue(summary["problem"])
         self.assertEqual(summary["stale_after_seconds"], 180.0)
 
+    def test_ai_scheduler_summary_exposes_guardrail_block_without_claiming_queue_error(self) -> None:
+        (self.module.WORK_PATH / "ai_scheduler_state.json").write_text(json.dumps({
+            "state": "paused", "reason_code": "m2_guardrail_not_armed", "updated_at": time.time(),
+        }))
+        (self.module.WORK_PATH / "m2_server_canary_circuit_breaker.json").write_text(json.dumps({
+            "tripped": True, "latest_trip": {"reason_code": "incorrect_completion",
+                "evidence": {"stage": "m2_strict_completion"}},
+        }))
+        summary = self.module._ai_scheduler_summary({})
+        self.assertTrue(summary["admission_blocked"])
+        self.assertEqual(summary["blocking_reason_code"], "incorrect_completion")
+        self.assertEqual(summary["blocking_stage"], "m2_strict_completion")
+        self.assertFalse(summary["problem"])
+
+    def test_ai_scheduler_summary_does_not_reuse_old_trip_after_resume(self) -> None:
+        (self.module.WORK_PATH / "ai_scheduler_state.json").write_text(json.dumps({
+            "state": "idle", "reason_code": "queue_empty", "updated_at": time.time(),
+        }))
+        (self.module.WORK_PATH / "m2_server_canary_circuit_breaker.json").write_text(json.dumps({
+            "tripped": False, "latest_trip": {"reason_code": "incorrect_completion"},
+        }))
+        summary = self.module._ai_scheduler_summary({})
+        self.assertFalse(summary["admission_blocked"])
+        self.assertEqual(summary["blocking_reason_code"], "")
+
     def test_dashboard_recommends_one_click_scheduler_retry(self) -> None:
         recommendations = self.module._dashboard_recommendations(
             {

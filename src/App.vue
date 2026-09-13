@@ -561,6 +561,11 @@ const automaticRecoveryCount = computed(() => (
 ));
 const aiStandbyMessage = computed(() => {
   const count = queueCounts.value.queued || 0;
+  if (aiScheduler.value.admission_blocked) {
+    const reason = aiScheduler.value.blocking_reason_code || aiScheduler.value.reason_code || "admission_paused";
+    const stage = aiScheduler.value.blocking_stage;
+    return `停止領取：${reason}${stage ? ` / ${stage}` : ""}。${count} 筆工作保留中；阻塞解除前不會領取新工作。`;
+  }
   if (aiSchedulerNeedsAttention.value) {
     return aiSchedulerProblemDetail.value;
   }

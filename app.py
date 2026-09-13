@@ -3350,6 +3350,21 @@ def _ai_scheduler_summary(config: dict[str, Any] | None = None) -> dict[str, Any
     stale = bool(path.exists() and heartbeat_age is not None and heartbeat_age > stale_after)
     state = str(payload.get("state") or ("unknown" if path.exists() else "unavailable")).strip().casefold()
     reason_code = str(payload.get("reason_code") or "").strip().casefold()
+    admission_blocked = state == "paused"
+    blocking_reason = reason_code if admission_blocked else ""
+    blocking_stage = ""
+    if admission_blocked and reason_code == "m2_guardrail_not_armed":
+        breaker_path = Path(str((config or {}).get("m2_server_canary_circuit_breaker_state_path")
+                                or "m2_server_canary_circuit_breaker.json"))
+        if not breaker_path.is_absolute():
+            breaker_path = WORK_PATH / breaker_path
+        breaker = _read_json_object(breaker_path)
+        trip = breaker.get("latest_trip") or {}
+        if breaker.get("tripped") is True and isinstance(trip, dict):
+            blocking_reason = str(trip.get("reason_code") or reason_code)
+            trip_evidence = trip.get("evidence")
+            if isinstance(trip_evidence, dict):
+                blocking_stage = str(trip_evidence.get("stage") or "")
     problem = bool(
         stale
         or state == "error"
@@ -3361,6 +3376,9 @@ def _ai_scheduler_summary(config: dict[str, Any] | None = None) -> dict[str, Any
         "exists": path.exists(),
         "state": state,
         "reason_code": reason_code,
+        "admission_blocked": admission_blocked,
+        "blocking_reason_code": blocking_reason,
+        "blocking_stage": blocking_stage,
         "message": str(payload.get("message") or ""),
         "error": str(payload.get("error") or ""),
         "worker_pid": _coerce_int(payload.get("worker_pid")) or None,
@@ -11170,7 +11188,9 @@ def _v2_overview_payload() -> dict[str, Any]:
     ai_delivery_slo = _ai_delivery_slo_summary()
     health_summary = _health_summary(config, fast=True)
     bottleneck = "idle"
-    if ai_scheduler.get("problem"):
+    if ai_scheduler.get("admission_blocked"):
+        bottleneck = str(ai_scheduler.get("blocking_reason_code") or "admission_paused")
+    elif ai_scheduler.get("problem"):
         bottleneck = "ai_scheduler_error"
     elif current_ai:
         bottleneck = str(current_ai.get("stage") or "ai")
