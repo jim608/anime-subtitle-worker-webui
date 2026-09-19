@@ -234,7 +234,7 @@ rollback() {
       pause-reconciliation --config /app/config.yaml \
       --reconciliation-id "$RECONCILIATION_HOLD_ID" || \
       echo "Reconciliation pause could not be rechecked; retain maintenance protections and inspect the failed container." >&2
-    docker run --rm -v "$WORK_DIR:/work" --entrypoint python "$WORKER_IMAGE" \
+    docker run --rm --label org.anime-subtitle.project=anime-subtitle-platform --label org.anime-subtitle.temporary=true --label org.anime-subtitle.purpose=deployment-helper --label "org.anime-subtitle.run-id=$DEPLOYMENT_ID" --label org.anime-subtitle.creator=safe-update-stack.sh -v "$WORK_DIR:/work" --entrypoint python "$WORKER_IMAGE" \
       /app/deployment_backup_retention.py mark \
       --backup "/work/deployment_backups/$DEPLOYMENT_ID" \
       --state deployment_failed --verified-by authorized-reconciliation-preserve >/dev/null 2>&1 || true
@@ -250,7 +250,7 @@ rollback() {
   remove_container_for_recreate "$WORKER_CONTAINER" 60 || true
   remove_container_for_recreate "$WEBUI_CONTAINER" 30 || true
   if [ -f "$BACKUP_DIR/SHA256SUMS" ]; then
-    docker run --rm -v "$WORK_DIR:/work" --entrypoint python "$WORKER_IMAGE" \
+    docker run --rm --label org.anime-subtitle.project=anime-subtitle-platform --label org.anime-subtitle.temporary=true --label org.anime-subtitle.purpose=deployment-helper --label "org.anime-subtitle.run-id=$DEPLOYMENT_ID" --label org.anime-subtitle.creator=safe-update-stack.sh -v "$WORK_DIR:/work" --entrypoint python "$WORKER_IMAGE" \
       /app/deployment_backup_retention.py mark \
       --backup "/work/deployment_backups/$DEPLOYMENT_ID" \
       --state deployment_failed \
@@ -333,13 +333,13 @@ assert_source_trees_unchanged() {
 }
 
 verify_worker_image_sources() {
-  image_revision="$(docker run --rm --entrypoint cat "$WORKER_IMAGE" /app/.source-revision 2>/dev/null || true)"
+  image_revision="$(docker run --rm --label org.anime-subtitle.project=anime-subtitle-platform --label org.anime-subtitle.temporary=true --label org.anime-subtitle.purpose=deployment-helper --label "org.anime-subtitle.run-id=$DEPLOYMENT_ID" --label org.anime-subtitle.creator=safe-update-stack.sh --entrypoint cat "$WORKER_IMAGE" /app/.source-revision 2>/dev/null || true)"
   if [ "$image_revision" != "$WORKER_SOURCE_REVISION" ]; then
     echo "Built Worker image revision mismatch. live=$image_revision expected=$WORKER_SOURCE_REVISION" >&2
     return 1
   fi
   image_python_revision="$(
-    docker run --rm --entrypoint sh "$WORKER_IMAGE" -c \
+    docker run --rm --label org.anime-subtitle.project=anime-subtitle-platform --label org.anime-subtitle.temporary=true --label org.anime-subtitle.purpose=deployment-helper --label "org.anime-subtitle.run-id=$DEPLOYMENT_ID" --label org.anime-subtitle.creator=safe-update-stack.sh --entrypoint sh "$WORKER_IMAGE" -c \
       'cd /app && LC_ALL=C sha256sum ./*.py' | LC_ALL=C sha256sum | awk '{print $1}'
   )"
   if [ "$image_python_revision" != "$WORKER_PYTHON_REVISION" ]; then
@@ -363,7 +363,7 @@ verify_worker_image_sources() {
     deployment_backup_retention.py
   do
     expected_sha="$(sha256sum "$WORKER_DIR/$worker_source_file" | awk '{print substr($1, 1, 12)}')"
-    image_sha="$(docker run --rm --entrypoint sha256sum "$WORKER_IMAGE" "/app/$worker_source_file" | awk '{print substr($1, 1, 12)}')"
+    image_sha="$(docker run --rm --label org.anime-subtitle.project=anime-subtitle-platform --label org.anime-subtitle.temporary=true --label org.anime-subtitle.purpose=deployment-helper --label "org.anime-subtitle.run-id=$DEPLOYMENT_ID" --label org.anime-subtitle.creator=safe-update-stack.sh --entrypoint sha256sum "$WORKER_IMAGE" "/app/$worker_source_file" | awk '{print substr($1, 1, 12)}')"
     if [ "$expected_sha" != "$image_sha" ]; then
       echo "Built Worker image source mismatch. file=$worker_source_file image=$image_sha expected=$expected_sha" >&2
       return 1
@@ -372,14 +372,14 @@ verify_worker_image_sources() {
 }
 
 verify_webui_image_sources() {
-  image_revision="$(docker run --rm --entrypoint cat "$WEBUI_IMAGE" /app/.source-revision 2>/dev/null || true)"
+  image_revision="$(docker run --rm --label org.anime-subtitle.project=anime-subtitle-platform --label org.anime-subtitle.temporary=true --label org.anime-subtitle.purpose=deployment-helper --label "org.anime-subtitle.run-id=$DEPLOYMENT_ID" --label org.anime-subtitle.creator=safe-update-stack.sh --entrypoint cat "$WEBUI_IMAGE" /app/.source-revision 2>/dev/null || true)"
   if [ "$image_revision" != "$WEBUI_SOURCE_REVISION" ]; then
     echo "Built WebUI image revision mismatch. live=$image_revision expected=$WEBUI_SOURCE_REVISION" >&2
     return 1
   fi
   for webui_source_file in app.py control_api.py; do
     expected_sha="$(sha256sum "$WEBUI_DIR/$webui_source_file" | awk '{print substr($1, 1, 12)}')"
-    image_sha="$(docker run --rm --entrypoint sha256sum "$WEBUI_IMAGE" "/app/$webui_source_file" | awk '{print substr($1, 1, 12)}')"
+    image_sha="$(docker run --rm --label org.anime-subtitle.project=anime-subtitle-platform --label org.anime-subtitle.temporary=true --label org.anime-subtitle.purpose=deployment-helper --label "org.anime-subtitle.run-id=$DEPLOYMENT_ID" --label org.anime-subtitle.creator=safe-update-stack.sh --entrypoint sha256sum "$WEBUI_IMAGE" "/app/$webui_source_file" | awk '{print substr($1, 1, 12)}')"
     if [ "$expected_sha" != "$image_sha" ]; then
       echo "Built WebUI image source mismatch. file=$webui_source_file image=$image_sha expected=$expected_sha" >&2
       return 1
@@ -390,7 +390,7 @@ verify_webui_image_sources() {
 verify_worker_image_config() (
   image_ref="$1"
   image_label="$2"
-  if ! config_output="$(docker run --rm \
+  if ! config_output="$(docker run --rm --label org.anime-subtitle.project=anime-subtitle-platform --label org.anime-subtitle.temporary=true --label org.anime-subtitle.purpose=deployment-helper --label "org.anime-subtitle.run-id=$DEPLOYMENT_ID" --label org.anime-subtitle.creator=safe-update-stack.sh \
     -v "$CONFIG_FILE:/app/deployment-config.yaml:ro" \
     --entrypoint python "$image_ref" \
     -c 'from config import load_config; load_config("/app/deployment-config.yaml")' 2>&1)"; then
@@ -426,7 +426,7 @@ verify_worker_image_config "$OLD_WORKER_IMAGE_ID" "Rollback Worker image"
 
 if [ -n "$SCANNER_STATE_RESTORE_DEPLOYMENT_ID" ]; then
   echo "Verifying requested scanner state restore source before maintenance."
-  docker run --rm -v "$WORK_DIR:/work:ro" --entrypoint python "$WORKER_IMAGE" \
+  docker run --rm --label org.anime-subtitle.project=anime-subtitle-platform --label org.anime-subtitle.temporary=true --label org.anime-subtitle.purpose=deployment-helper --label "org.anime-subtitle.run-id=$DEPLOYMENT_ID" --label org.anime-subtitle.creator=safe-update-stack.sh -v "$WORK_DIR:/work:ro" --entrypoint python "$WORKER_IMAGE" \
     /app/scanner_state_recovery.py \
     --work-root /work \
     --source-deployment-id "$SCANNER_STATE_RESTORE_DEPLOYMENT_ID"
@@ -434,8 +434,8 @@ fi
 
 if [ "$RUN_TESTS" != "0" ]; then
   echo "[2/8] Running the full source tests inside the newly built images."
-  docker run --rm --entrypoint sh -v "$WORKER_DIR:/src:ro" "$WORKER_IMAGE" -c 'cd /src && python -B -m unittest'
-  docker run --rm --entrypoint sh -v "$WEBUI_DIR:/src:ro" "$WEBUI_IMAGE" -c 'cd /src && python -B -m unittest tests.test_webui_backend tests.test_deployment_script'
+  docker run --rm --label org.anime-subtitle.project=anime-subtitle-platform --label org.anime-subtitle.temporary=true --label org.anime-subtitle.purpose=deployment-helper --label "org.anime-subtitle.run-id=$DEPLOYMENT_ID" --label org.anime-subtitle.creator=safe-update-stack.sh --entrypoint sh -v "$WORKER_DIR:/src:ro" "$WORKER_IMAGE" -c 'cd /src && python -B -m unittest'
+  docker run --rm --label org.anime-subtitle.project=anime-subtitle-platform --label org.anime-subtitle.temporary=true --label org.anime-subtitle.purpose=deployment-helper --label "org.anime-subtitle.run-id=$DEPLOYMENT_ID" --label org.anime-subtitle.creator=safe-update-stack.sh --entrypoint sh -v "$WEBUI_DIR:/src:ro" "$WEBUI_IMAGE" -c 'cd /src && python -B -m unittest tests.test_webui_backend tests.test_deployment_script'
 else
   echo "[2/8] RUN_TESTS=0; pre-deployment tests were explicitly skipped."
 fi
@@ -560,7 +560,7 @@ PY
   if [ "$stale_ai_recovery_attempted" = "0" ] && [ "$stale_ai_recovery_eligible" = "1" ]; then
     stale_ai_recovery_attempted=1
     echo "  Requeuing one or more timed-out running AI queue rows through the Worker maintenance CLI."
-    if docker run --rm --volumes-from "$WORKER_CONTAINER" --entrypoint python "$WORKER_IMAGE" /app/main.py --config /app/config.yaml --requeue-stale-ai-running; then
+    if docker run --rm --label org.anime-subtitle.project=anime-subtitle-platform --label org.anime-subtitle.temporary=true --label org.anime-subtitle.purpose=deployment-helper --label "org.anime-subtitle.run-id=$DEPLOYMENT_ID" --label org.anime-subtitle.creator=safe-update-stack.sh --volumes-from "$WORKER_CONTAINER" --entrypoint python "$WORKER_IMAGE" /app/main.py --config /app/config.yaml --requeue-stale-ai-running; then
       echo "  Stale AI queue recovery command completed; rechecking the safe endpoint."
     else
       echo "  Stale AI queue recovery command was unavailable or failed; deployment remains in the safe wait loop." >&2
@@ -612,7 +612,7 @@ echo "[4/8] Creating online SQLite backups, important state backup and SHA-256 m
 mkdir -p "$BACKUP_DIR/runtime"
 docker inspect "$WORKER_CONTAINER" > "$BACKUP_DIR/runtime/worker-inspect-before.json" 2>/dev/null || true
 docker logs --timestamps --tail 500 "$WORKER_CONTAINER" > "$BACKUP_DIR/runtime/worker-log-before.txt" 2>&1 || true
-docker run --rm -i -v "$WORK_DIR:/work" --entrypoint python "$WORKER_IMAGE" - "$DEPLOYMENT_ID" <<'PY'
+docker run --rm --label org.anime-subtitle.project=anime-subtitle-platform --label org.anime-subtitle.temporary=true --label org.anime-subtitle.purpose=deployment-helper --label "org.anime-subtitle.run-id=$DEPLOYMENT_ID" --label org.anime-subtitle.creator=safe-update-stack.sh -i -v "$WORK_DIR:/work" --entrypoint python "$WORKER_IMAGE" - "$DEPLOYMENT_ID" <<'PY'
 from pathlib import Path
 import sqlite3
 import sys
@@ -657,11 +657,11 @@ if [ "$BACKUP_AI_CACHE" != "0" ] && [ -d "$WORK_DIR/ai_srt_cache" ]; then
 fi
 printf '{"worker":"%s","webui":"%s","deployment_id":"%s"}\n' \
   "$OLD_WORKER_IMAGE_ID" "$OLD_WEBUI_IMAGE_ID" "$DEPLOYMENT_ID" > "$BACKUP_DIR/images.json"
-docker run --rm -v "$WORK_DIR:/work" --entrypoint python "$WORKER_IMAGE" \
+docker run --rm --label org.anime-subtitle.project=anime-subtitle-platform --label org.anime-subtitle.temporary=true --label org.anime-subtitle.purpose=deployment-helper --label "org.anime-subtitle.run-id=$DEPLOYMENT_ID" --label org.anime-subtitle.creator=safe-update-stack.sh -v "$WORK_DIR:/work" --entrypoint python "$WORKER_IMAGE" \
   /app/deployment_backup_retention.py create \
   --backup "/work/deployment_backups/$DEPLOYMENT_ID"
 (cd "$BACKUP_DIR" && sha256sum -c SHA256SUMS)
-docker run --rm -v "$WORK_DIR:/work" --entrypoint python "$WORKER_IMAGE" \
+docker run --rm --label org.anime-subtitle.project=anime-subtitle-platform --label org.anime-subtitle.temporary=true --label org.anime-subtitle.purpose=deployment-helper --label "org.anime-subtitle.run-id=$DEPLOYMENT_ID" --label org.anime-subtitle.creator=safe-update-stack.sh -v "$WORK_DIR:/work" --entrypoint python "$WORKER_IMAGE" \
   /app/deployment_backup_retention.py mark \
   --backup "/work/deployment_backups/$DEPLOYMENT_ID" \
   --state backup_verified \
@@ -669,7 +669,7 @@ docker run --rm -v "$WORK_DIR:/work" --entrypoint python "$WORKER_IMAGE" \
   --external-sha256-verified
 
 echo "[5/8] Rehearsing every additive database migration on backup copies."
-docker run --rm -v "$WORK_DIR:/work" --entrypoint python "$WORKER_IMAGE" \
+docker run --rm --label org.anime-subtitle.project=anime-subtitle-platform --label org.anime-subtitle.temporary=true --label org.anime-subtitle.purpose=deployment-helper --label "org.anime-subtitle.run-id=$DEPLOYMENT_ID" --label org.anime-subtitle.creator=safe-update-stack.sh -v "$WORK_DIR:/work" --entrypoint python "$WORKER_IMAGE" \
   /app/migration_preflight.py --backup-dir "/work/deployment_backups/$DEPLOYMENT_ID"
 
 assert_source_trees_unchanged "before-container-recreate"
@@ -683,7 +683,7 @@ remove_container_for_recreate "$WORKER_CONTAINER" 60
 remove_container_for_recreate "$WEBUI_CONTAINER" 30
 if [ -n "$SCANNER_STATE_RESTORE_DEPLOYMENT_ID" ]; then
   echo "Restoring verified scanner state while all database consumers are stopped."
-  docker run --rm -v "$WORK_DIR:/work" --entrypoint python "$WORKER_IMAGE" \
+  docker run --rm --label org.anime-subtitle.project=anime-subtitle-platform --label org.anime-subtitle.temporary=true --label org.anime-subtitle.purpose=deployment-helper --label "org.anime-subtitle.run-id=$DEPLOYMENT_ID" --label org.anime-subtitle.creator=safe-update-stack.sh -v "$WORK_DIR:/work" --entrypoint python "$WORKER_IMAGE" \
     /app/scanner_state_recovery.py \
     --work-root /work \
     --source-deployment-id "$SCANNER_STATE_RESTORE_DEPLOYMENT_ID" \
@@ -1008,7 +1008,7 @@ set -- "$@" \
   --daily "$BACKUP_RETENTION_DAILY" \
   --weekly "$BACKUP_RETENTION_WEEKLY" \
   --apply
-docker run --rm -v "$WORK_DIR:/work" -v "$LOG_DIR:/logs:ro" --entrypoint python "$WORKER_IMAGE" "$@"
+docker run --rm --label org.anime-subtitle.project=anime-subtitle-platform --label org.anime-subtitle.temporary=true --label org.anime-subtitle.purpose=deployment-helper --label "org.anime-subtitle.run-id=$DEPLOYMENT_ID" --label org.anime-subtitle.creator=safe-update-stack.sh -v "$WORK_DIR:/work" -v "$LOG_DIR:/logs:ro" --entrypoint python "$WORKER_IMAGE" "$@"
 else
   echo "  Backup retention disabled; all existing backups preserved."
 fi
@@ -1160,7 +1160,7 @@ else:
     )
 PY
 
-docker run --rm -v "$WORK_DIR:/work" --entrypoint python "$WORKER_IMAGE" \
+docker run --rm --label org.anime-subtitle.project=anime-subtitle-platform --label org.anime-subtitle.temporary=true --label org.anime-subtitle.purpose=deployment-helper --label "org.anime-subtitle.run-id=$DEPLOYMENT_ID" --label org.anime-subtitle.creator=safe-update-stack.sh -v "$WORK_DIR:/work" --entrypoint python "$WORKER_IMAGE" \
   /app/deployment_backup_retention.py mark \
   --backup "/work/deployment_backups/$DEPLOYMENT_ID" \
   --state deployment_completed \
@@ -1169,7 +1169,7 @@ RECOVERY_ANCHOR_DEPLOYMENT_ID="$DEPLOYMENT_ID"
 if [ -n "$SCANNER_STATE_RESTORE_DEPLOYMENT_ID" ]; then
   RECOVERY_ANCHOR_DEPLOYMENT_ID="$SCANNER_STATE_RESTORE_DEPLOYMENT_ID"
 fi
-docker run --rm -v "$WORK_DIR:/work" --entrypoint python "$WORKER_IMAGE" \
+docker run --rm --label org.anime-subtitle.project=anime-subtitle-platform --label org.anime-subtitle.temporary=true --label org.anime-subtitle.purpose=deployment-helper --label "org.anime-subtitle.run-id=$DEPLOYMENT_ID" --label org.anime-subtitle.creator=safe-update-stack.sh -v "$WORK_DIR:/work" --entrypoint python "$WORKER_IMAGE" \
   /app/scanner_state_recovery.py \
   --work-root /work \
   --source-deployment-id "$RECOVERY_ANCHOR_DEPLOYMENT_ID" \
