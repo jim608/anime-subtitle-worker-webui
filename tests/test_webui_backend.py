@@ -901,13 +901,15 @@ class WebuiBackendTests(unittest.TestCase):
             "state": "paused", "reason_code": "m2_guardrail_not_armed", "updated_at": time.time(),
         }))
         (self.module.WORK_PATH / "m2_server_canary_circuit_breaker.json").write_text(json.dumps({
-            "tripped": True, "latest_trip": {"reason_code": "incorrect_completion",
-                "evidence": {"stage": "m2_strict_completion"}},
+            "tripped": True, "latest_trip": {"reason_code": "incorrect_completion", "observed_at": 1789308157.861311,
+                "evidence": {"stage": "m2_strict_completion", "error_code": "missing_acceptance"}},
         }))
         summary = self.module._ai_scheduler_summary({})
         self.assertTrue(summary["admission_blocked"])
         self.assertEqual(summary["blocking_reason_code"], "incorrect_completion")
         self.assertEqual(summary["blocking_stage"], "m2_strict_completion")
+        self.assertEqual(summary["blocking_error_code"], "missing_acceptance")
+        self.assertEqual(summary["blocking_observed_at"], 1789308157.861311)
         self.assertFalse(summary["problem"])
 
     def test_ai_scheduler_summary_does_not_reuse_old_trip_after_resume(self) -> None:
@@ -920,6 +922,24 @@ class WebuiBackendTests(unittest.TestCase):
         summary = self.module._ai_scheduler_summary({})
         self.assertFalse(summary["admission_blocked"])
         self.assertEqual(summary["blocking_reason_code"], "")
+
+    def test_ai_scheduler_preserves_first_stop_when_latest_trip_changes(self) -> None:
+        (self.module.WORK_PATH / "ai_scheduler_state.json").write_text(json.dumps({
+            "state":"paused", "reason_code":"m2_guardrail_not_armed", "updated_at":time.time(),
+            "last_claim_at":100.0,
+        }))
+        latest={"reason_code":"runtime_change", "observed_at":300.0,
+                "evidence":{"stage":"runtime_validation", "error_code":"provider_observation_expired_or_clock_invalid"}}
+        (self.module.WORK_PATH / "m2_server_canary_circuit_breaker.json").write_text(json.dumps({
+            "tripped":True, "latest_trip":latest, "reasons":[
+                {"reason_code":"old_resolved", "observed_at":50.0},
+                {"reason_code":"incorrect_completion", "observed_at":150.0},latest],
+        }))
+        summary=self.module._ai_scheduler_summary({})
+        self.assertEqual(summary["blocking_origin_reason_code"],"incorrect_completion")
+        self.assertEqual(summary["blocking_origin_observed_at"],150.0)
+        self.assertEqual(summary["blocking_error_code"],"provider_observation_expired_or_clock_invalid")
+        self.assertEqual(summary["blocking_observed_at"],300.0)
 
     def test_dashboard_recommends_one_click_scheduler_retry(self) -> None:
         recommendations = self.module._dashboard_recommendations(

@@ -26,6 +26,8 @@ BACKUP_RETENTION_DAILY="${BACKUP_RETENTION_DAILY:-7}"
 BACKUP_RETENTION_WEEKLY="${BACKUP_RETENTION_WEEKLY:-4}"
 SCANNER_STATE_RESTORE_DEPLOYMENT_ID="${SCANNER_STATE_RESTORE_DEPLOYMENT_ID:-}"
 RUN_TESTS="${RUN_TESTS:-1}"
+PRESERVE_EXISTING_BACKUPS="${PRESERVE_EXISTING_BACKUPS:-0}"
+RUN_QUALITY_SIDECAR_MIGRATION="${RUN_QUALITY_SIDECAR_MIGRATION:-1}"
 UPDATE_LOCK_DIR="${UPDATE_LOCK_DIR:-$WORK_DIR/deployment_update.lock}"
 AUTO_RECOVER_ORPHANED_PREBACKUP="${AUTO_RECOVER_ORPHANED_PREBACKUP:-1}"
 # Explicit owned maintenance mode: failures preserve current databases and
@@ -52,6 +54,10 @@ case "$AUTO_RECOVER_ORPHANED_PREBACKUP" in
 esac
 case "$RECONCILIATION_HOLD_ID" in
   *[!A-Za-z0-9_-]*) echo "Invalid reconciliation hold id." >&2; exit 2 ;;
+esac
+case "$PRESERVE_EXISTING_BACKUPS:$RUN_QUALITY_SIDECAR_MIGRATION" in
+  0:0|0:1|1:0|1:1) ;;
+  *) echo "Backup preservation and sidecar migration options must be 0 or 1." >&2; exit 2 ;;
 esac
 
 for command_name in docker curl sha256sum cp mv sed sh; do
@@ -743,6 +749,7 @@ for webui_source_file in app.py control_api.py; do
   fi
 done
 
+if [ "$RUN_QUALITY_SIDECAR_MIGRATION" = "1" ]; then
 echo "  Moving legacy quality reports out of the media library while new work is held."
 docker exec -i "$WORKER_CONTAINER" python /app/migrate_quality_sidecars.py \
   --root /anime \
@@ -750,6 +757,9 @@ docker exec -i "$WORKER_CONTAINER" python /app/migrate_quality_sidecars.py \
   --container-anime-root /anime \
   --apply \
   --progress-interval 30
+else
+  echo "  Quality sidecar migration disabled; existing media-side files preserved."
+fi
 
 echo "[7/8] Verifying health, v2 payloads, series API and command mailbox end to end."
 docker exec -i "$WEBUI_CONTAINER" python - "$DEPLOYMENT_ID" "$COMMAND_PROBE_TIMEOUT_SECONDS" <<'PY'
@@ -984,6 +994,7 @@ print(json.dumps({
 PY
 
 echo "[8/8] Applying verified backup retention, then releasing deployment hold."
+if [ "$PRESERVE_EXISTING_BACKUPS" = "0" ]; then
 set -- \
   /app/deployment_backup_retention.py prune \
   --root /work/deployment_backups \
@@ -998,6 +1009,9 @@ set -- "$@" \
   --weekly "$BACKUP_RETENTION_WEEKLY" \
   --apply
 docker run --rm -v "$WORK_DIR:/work" -v "$LOG_DIR:/logs:ro" --entrypoint python "$WORKER_IMAGE" "$@"
+else
+  echo "  Backup retention disabled; all existing backups preserved."
+fi
 restore_ai_control
 rm -f "$HOLD_FILE"
 

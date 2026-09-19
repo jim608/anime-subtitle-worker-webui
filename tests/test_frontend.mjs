@@ -286,6 +286,8 @@ assert.match(appVue, /healthState/);
 assert.match(appVue, /aiSchedulerNeedsAttention/);
 assert.match(appVue, /aiScheduler\.value\.admission_blocked/);
 assert.match(appVue, /blocking_reason_code/);
+assert.match(appVue, /blocking_error_code/);
+assert.match(appVue, /blocking_observed_at/);
 assert.match(appVue, /阻塞解除前不會領取新工作/);
 assert.match(appVue, /AI 排程暫時讀不到工作清單/);
 assert.match(appVue, /立即重試 AI 排程/);

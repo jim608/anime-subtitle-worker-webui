@@ -9,6 +9,24 @@ from unittest.mock import patch
 
 
 class DeploymentScriptContractTests(unittest.TestCase):
+    def test_preserve_mode_does_not_prune_or_migrate_sidecars(self) -> None:
+        shell = shutil.which("sh")
+        if shell is None:
+            self.skipTest("POSIX sh is unavailable")
+        script = Path("safe-update-stack.sh").read_text(encoding="utf-8")
+        migration = script.split('if [ "$RUN_QUALITY_SIDECAR_MIGRATION" = "1" ]; then', 1)[1].split('\nfi', 1)[0]
+        retention = script.split('if [ "$PRESERVE_EXISTING_BACKUPS" = "0" ]; then', 1)[1].split('\nrestore_ai_control', 1)[0]
+        # Execute only the two isolated branches with Docker replaced by a spy.
+        retention = retention[:retention.rfind('\nfi')+3]
+        harness = 'docker() { echo FORBIDDEN_MUTATION; };\nRUN_QUALITY_SIDECAR_MIGRATION=0\nPRESERVE_EXISTING_BACKUPS=1\n'
+        harness += 'if [ "$RUN_QUALITY_SIDECAR_MIGRATION" = "1" ]; then' + migration + '\nfi\n'
+        harness += 'if [ "$PRESERVE_EXISTING_BACKUPS" = "0" ]; then' + retention + '\n'
+        result = subprocess.run([shell,"-c",harness],capture_output=True,text=True)
+        self.assertEqual(result.returncode,0,result.stderr)
+        self.assertNotIn('FORBIDDEN_MUTATION',result.stdout)
+        self.assertIn('all existing backups preserved',result.stdout)
+        self.assertIn('existing media-side files preserved',result.stdout)
+
     def test_authorized_post_retire_failure_does_not_rollback_database_or_image(self) -> None:
         shell = shutil.which("sh")
         if shell is None:

@@ -564,7 +564,13 @@ const aiStandbyMessage = computed(() => {
   if (aiScheduler.value.admission_blocked) {
     const reason = aiScheduler.value.blocking_reason_code || aiScheduler.value.reason_code || "admission_paused";
     const stage = aiScheduler.value.blocking_stage;
-    return `停止領取：${reason}${stage ? ` / ${stage}` : ""}。${count} 筆工作保留中；阻塞解除前不會領取新工作。`;
+    const error = aiScheduler.value.blocking_error_code;
+    const observedAt = Number(aiScheduler.value.blocking_observed_at || 0);
+    const when = observedAt > 0 ? new Date(observedAt * 1000).toLocaleString() : "";
+    const origin = aiScheduler.value.blocking_origin_reason_code;
+    const originAt = Number(aiScheduler.value.blocking_origin_observed_at || 0);
+    const firstCause = origin && originAt > 0 && originAt < observedAt ? `；最初停止：${origin}（${new Date(originAt * 1000).toLocaleString()}）` : "";
+    return `停止領取：${reason}${error && error !== reason ? ` / ${error}` : ""}${stage ? ` / ${stage}` : ""}${when ? `（${when}）` : ""}${firstCause}。${count} 筆工作保留中；阻塞解除前不會領取新工作。`;
   }
   if (aiSchedulerNeedsAttention.value) {
     return aiSchedulerProblemDetail.value;

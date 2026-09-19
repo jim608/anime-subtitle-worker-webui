@@ -3353,6 +3353,10 @@ def _ai_scheduler_summary(config: dict[str, Any] | None = None) -> dict[str, Any
     admission_blocked = state == "paused"
     blocking_reason = reason_code if admission_blocked else ""
     blocking_stage = ""
+    blocking_error = ""
+    blocking_origin_reason = ""
+    blocking_origin_at = 0.0
+    blocking_at = state_changed_at if admission_blocked else 0.0
     if admission_blocked and reason_code == "m2_guardrail_not_armed":
         breaker_path = Path(str((config or {}).get("m2_server_canary_circuit_breaker_state_path")
                                 or "m2_server_canary_circuit_breaker.json"))
@@ -3362,9 +3366,21 @@ def _ai_scheduler_summary(config: dict[str, Any] | None = None) -> dict[str, Any
         trip = breaker.get("latest_trip") or {}
         if breaker.get("tripped") is True and isinstance(trip, dict):
             blocking_reason = str(trip.get("reason_code") or reason_code)
+            blocking_at = _coerce_float(trip.get("observed_at")) or blocking_at
             trip_evidence = trip.get("evidence")
             if isinstance(trip_evidence, dict):
                 blocking_stage = str(trip_evidence.get("stage") or "")
+                blocking_error = str(trip_evidence.get("error_code") or "")
+            # Keep the first refusal since the last real claim visible even
+            # when a later protective event becomes latest_trip.
+            last_claim = _coerce_float(payload.get("last_claim_at")) or 0.0
+            reasons = breaker.get("reasons") or []
+            candidates = [item for item in reasons if isinstance(item, dict)
+                          and last_claim > 0 and (_coerce_float(item.get("observed_at")) or 0) >= last_claim]
+            if candidates:
+                first = min(candidates, key=lambda item: _coerce_float(item.get("observed_at")) or 0)
+                blocking_origin_reason = str(first.get("reason_code") or "")
+                blocking_origin_at = _coerce_float(first.get("observed_at")) or 0.0
     problem = bool(
         stale
         or state == "error"
@@ -3379,6 +3395,10 @@ def _ai_scheduler_summary(config: dict[str, Any] | None = None) -> dict[str, Any
         "admission_blocked": admission_blocked,
         "blocking_reason_code": blocking_reason,
         "blocking_stage": blocking_stage,
+        "blocking_error_code": blocking_error,
+        "blocking_observed_at": blocking_at,
+        "blocking_origin_reason_code": blocking_origin_reason,
+        "blocking_origin_observed_at": blocking_origin_at,
         "message": str(payload.get("message") or ""),
         "error": str(payload.get("error") or ""),
         "worker_pid": _coerce_int(payload.get("worker_pid")) or None,
