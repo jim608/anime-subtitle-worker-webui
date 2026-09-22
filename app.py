@@ -3330,6 +3330,41 @@ def _ai_control_summary() -> dict[str, Any]:
     }
 
 
+def _laya_advisory_summary() -> dict[str, Any]:
+    """Read optional local advice; never call the model or change admission."""
+    path = WORK_PATH / "laya-diagnostics" / "latest.json"
+    categories = {"BAD_INPUT", "TRANSIENT", "RESOURCE", "PROVIDER", "SYSTEM_BUG", "INTEGRITY_RISK", "UNKNOWN"}
+    try:
+        with path.open("rb") as stream:
+            raw = stream.read(65537)
+        if len(raw) > 65536:
+            return {"status": "UNAVAILABLE", "reason": "diagnostic_record_over_limit"}
+        record = json.loads(raw)
+        if not isinstance(record, dict) or record.get("advisory_only") is not True:
+            return {"status": "UNAVAILABLE", "reason": "invalid_diagnostic_record"}
+        model = record.get("model") or {}
+        category = model.get("choice") if isinstance(model, dict) else None
+        if category is not None and category not in categories:
+            return {"status": "UNAVAILABLE", "reason": "invalid_diagnostic_category"}
+        evidence = record.get("evidence_ids") or []
+        if not isinstance(evidence, list) or len(evidence) > 20:
+            return {"status": "UNAVAILABLE", "reason": "invalid_diagnostic_evidence"}
+        reason = str(record.get("raw_reason") or "")
+        return {"status": str(record.get("status") or "UNAVAILABLE"),
+                "category": category, "advisory_only": True, "calibrated": False,
+                "raw_reason": reason[:1600], "raw_reason_truncated": len(reason) > 1600,
+                "evidence_ids": [str(value)[:256] for value in evidence],
+                "event_id": str(record.get("event_id") or "")[:256],
+                "record_id": str(record.get("record_id") or "")[:128],
+                "created_at": _coerce_float(record.get("created_at")) or 0.0,
+                "model_revision": str(record.get("model_revision") or "")[:64],
+                "reason": str(record.get("reason") or "")[:256]}
+    except FileNotFoundError:
+        return {"status": "NOT_AVAILABLE"}
+    except (OSError, ValueError, TypeError):
+        return {"status": "UNAVAILABLE", "reason": "diagnostic_record_unreadable"}
+
+
 def _ai_scheduler_summary(config: dict[str, Any] | None = None) -> dict[str, Any]:
     path = WORK_PATH / AI_SCHEDULER_STATE_NAME
     payload = _read_json_object(path)
@@ -3399,6 +3434,7 @@ def _ai_scheduler_summary(config: dict[str, Any] | None = None) -> dict[str, Any
         "blocking_observed_at": blocking_at,
         "blocking_origin_reason_code": blocking_origin_reason,
         "blocking_origin_observed_at": blocking_origin_at,
+        "laya_advisory": _laya_advisory_summary(),
         "message": str(payload.get("message") or ""),
         "error": str(payload.get("error") or ""),
         "worker_pid": _coerce_int(payload.get("worker_pid")) or None,

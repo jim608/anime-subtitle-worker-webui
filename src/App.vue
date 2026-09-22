@@ -559,6 +559,7 @@ const retryableFailureCount = computed(() => retryBacklogCount.value);
 const automaticRecoveryCount = computed(() => (
   mikanPipeline.value.autoReplacing + attentionSummary.value.blockedDownloads
 ));
+const layaAdvisory = computed(() => aiScheduler.value.laya_advisory || {});
 const aiStandbyMessage = computed(() => {
   const count = queueCounts.value.queued || 0;
   if (aiScheduler.value.admission_blocked) {
@@ -2493,6 +2494,12 @@ onUnmounted(() => {
             <div>
               <strong>AI 佇列等待 Worker</strong>
               <p>{{ aiStandbyMessage }}</p>
+              <details v-if="layaAdvisory.status && layaAdvisory.status !== 'NOT_AVAILABLE'">
+                <summary>Laya 建議：{{ layaAdvisory.category || '診斷不可用' }}（僅供診斷、未校準，非已確認根因）</summary>
+                <p>原始原因：{{ layaAdvisory.raw_reason || layaAdvisory.reason }}{{ layaAdvisory.raw_reason_truncated ? '（顯示節錄，完整內容保留於診斷紀錄）' : '' }}</p>
+                <p>診斷時間：{{ layaAdvisory.created_at ? new Date(layaAdvisory.created_at * 1000).toLocaleString() : '未記錄' }}</p>
+                <p>證據：{{ (layaAdvisory.evidence_ids || []).join('、') }}；紀錄：{{ layaAdvisory.record_id }}</p>
+              </details>
             </div>
             <button type="button" @click="navigate('queue')">查看佇列</button>
           </article>
